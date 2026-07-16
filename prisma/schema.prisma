@@ -1,7 +1,9 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
+// Prisma schema for UniQuiz MVP.
+// Source of truth: uniquiz-knowledge-base/03-how-it-works/data-model.md
+//
+// PostgreSQL holds only long-lived data (accounts, banks, content, game
+// summaries). The entire game flow (rooms, players, question snapshots,
+// answers) lives in Redis and has no tables here.
 
 generator client {
   provider = "prisma-client"
@@ -10,4 +12,106 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+/// Lifecycle of an AI-generated answer set:
+/// generating → self_check → in_review → accepted;
+/// from in_review also: edited (host edit, counts as accepted)
+/// or regenerating (back to the start of the cycle).
+/// Only questions with an accepted/edited set can enter a game.
+enum AnswerSetStatus {
+  generating
+  self_check
+  in_review
+  accepted
+  edited
+  regenerating
+}
+
+enum GameMode {
+  solo
+  multiplayer
+}
+
+/// Host account, minimal scope (email + password). Players need no account.
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  banks       Bank[]
+  gameResults GameResult[]
+
+  @@map("users")
+}
+
+/// Question bank owned by a host.
+model Bank {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  user        User         @relation(fields: [userId], references: [id])
+  questions   Question[]
+  gameResults GameResult[]
+
+  @@map("banks")
+}
+
+/// Question written by the host.
+model Question {
+  id              String   @id @default(uuid()) @db.Uuid
+  bankId          String   @map("bank_id") @db.Uuid
+  text            String
+  imageUrl        String?  @map("image_url")
+  referenceAnswer String?  @map("reference_answer")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  bank      Bank       @relation(fields: [bankId], references: [id])
+  answerSet AnswerSet?
+
+  @@map("questions")
+}
+
+/// AI-generated answer set; one active set per question in MVP.
+/// correctIndex and spareDistractor must never reach player-facing
+/// API responses or events — the server is the single source of truth.
+model AnswerSet {
+  id              String          @id @default(uuid()) @db.Uuid
+  questionId      String          @unique @map("question_id") @db.Uuid
+  /// Exactly 4 options (enforced by a CHECK constraint in the migration —
+  /// Prisma cannot express array-length constraints).
+  options         String[]
+  correctIndex    Int             @map("correct_index") @db.SmallInt
+  /// Spare distractor that replaces the correct option in the trap version.
+  spareDistractor String          @map("spare_distractor")
+  explanation     String
+  status          AnswerSetStatus
+  selfCheckPassed Boolean         @map("self_check_passed")
+  generatedAt     DateTime        @map("generated_at") @db.Timestamptz()
+  reviewedAt      DateTime?       @map("reviewed_at") @db.Timestamptz()
+
+  question Question @relation(fields: [questionId], references: [id])
+
+  @@map("answer_sets")
+}
+
+/// One row = one finished game; the host's game history.
+/// leaderboard: array of {nickname, totalScore, correctAnswers, avgResponseMs}.
+model GameResult {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  bankId        String   @map("bank_id") @db.Uuid
+  mode          GameMode
+  questionCount Int      @map("question_count")
+  finishedAt    DateTime @map("finished_at") @db.Timestamptz()
+  leaderboard   Json
+
+  user User @relation(fields: [userId], references: [id])
+  bank Bank @relation(fields: [bankId], references: [id])
+
+  @@map("game_results")
 }
