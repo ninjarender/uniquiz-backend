@@ -81,6 +81,21 @@ export class AuthService {
     return this.issueToken(user);
   }
 
+  /**
+   * Returns the account behind a verified token (User schema: id + email).
+   * 401 if the account no longer exists.
+   */
+  async getMe(userId: string): Promise<{ id: string; email: string }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true },
+    });
+    if (!user) {
+      throw new UnauthorizedException('Account no longer exists');
+    }
+    return user;
+  }
+
   private async issueToken(user: {
     id: string;
     email: string;

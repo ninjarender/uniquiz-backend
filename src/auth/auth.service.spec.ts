@@ -74,6 +74,31 @@ describe('AuthService', () => {
     });
   });
 
+  describe('getMe', () => {
+    it('returns id and email for an existing account', async () => {
+      userFindUnique.mockResolvedValue({
+        id: 'user-id',
+        email: 'host@example.com',
+      });
+
+      await expect(service.getMe('user-id')).resolves.toEqual({
+        id: 'user-id',
+        email: 'host@example.com',
+      });
+      expect(userFindUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'user-id' } }),
+      );
+    });
+
+    it('throws UnauthorizedException when the account is gone', async () => {
+      userFindUnique.mockResolvedValue(null);
+
+      await expect(service.getMe('ghost-id')).rejects.toThrow(
+        UnauthorizedException,
+      );
+    });
+  });
+
   describe('login', () => {
     const password = 'password123';
     const storedUser = {
