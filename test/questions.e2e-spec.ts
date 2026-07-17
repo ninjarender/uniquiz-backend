@@ -109,4 +109,50 @@ describe('Questions endpoints (e2e)', () => {
         .expect(401);
     });
   });
+
+  describe('PATCH /api/v1/questions/{questionId}', () => {
+    it('200: edits text; the existing answer set stays untouched', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const seeded = prismaMock.seedBank(idA, 'With sets', 2, 2);
+      const [questionId] = prismaMock.questionIdsOf(seeded.id);
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/questions/${questionId}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ text: 'Edited question text' })
+        .expect(200);
+
+      const question = response.body as {
+        text: string;
+        answerSet?: { status: string; options: string[] };
+      };
+      expect(question.text).toBe('Edited question text');
+      expect(question.answerSet?.status).toBe('accepted'); // not reset
+      expect(question.answerSet?.options).toHaveLength(4);
+    });
+
+    it('404: foreign question cannot be edited', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const seeded = prismaMock.seedBank(idA, 'Private QA', 1, 0);
+      const [questionId] = prismaMock.questionIdsOf(seeded.id);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/questions/${questionId}`)
+        .set('Authorization', `Bearer ${tokenB}`)
+        .send({ text: 'Hacked' })
+        .expect(404);
+    });
+
+    it('400: empty text is rejected', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const seeded = prismaMock.seedBank(idA, 'Valid QA', 1, 0);
+      const [questionId] = prismaMock.questionIdsOf(seeded.id);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/questions/${questionId}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ text: '' })
+        .expect(400);
+    });
+  });
 });

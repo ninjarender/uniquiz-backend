@@ -40,4 +40,56 @@ export class QuestionsService {
       referenceAnswer: question.referenceAnswer ?? undefined,
     };
   }
+
+  /**
+   * Edits the host's own question. By contract the edit never touches an
+   * existing answer set - regeneration is a separate host action
+   * (POST /answer-sets/{id}/regenerate). 404 for foreign/missing.
+   */
+  async updateQuestion(
+    userId: string,
+    questionId: string,
+    input: UpdateQuestionDto,
+  ): Promise<QuestionView> {
+    const { count } = await this.prisma.question.updateMany({
+      where: { id: questionId, bank: { userId } },
+      data: {
+        text: input.text,
+        imageUrl: input.imageUrl,
+        referenceAnswer: input.referenceAnswer,
+      },
+    });
+    if (count === 0) {
+      throw new NotFoundException('Question not found');
+    }
+
+    const question = await this.prisma.question.findUnique({
+      where: { id: questionId },
+      include: { answerSet: true },
+    });
+    if (!question) {
+      throw new NotFoundException('Question not found');
+    }
+    return {
+      id: question.id,
+      bankId: question.bankId,
+      text: question.text,
+      imageUrl: question.imageUrl ?? undefined,
+      referenceAnswer: question.referenceAnswer ?? undefined,
+      answerSet: question.answerSet
+        ? {
+            id: question.answerSet.id,
+            questionId: question.answerSet.questionId,
+            options: question.answerSet.options,
+            correctIndex: question.answerSet.correctIndex,
+            spareDistractor: question.answerSet.spareDistractor,
+            explanation: question.answerSet.explanation,
+            status: question.answerSet.status,
+            selfCheckPassed: question.answerSet.selfCheckPassed,
+            generatedAt: question.answerSet.generatedAt,
+            reviewedAt: question.answerSet.reviewedAt ?? undefined,
+          }
+        : undefined,
+    };
+  }
 }
