@@ -122,6 +122,50 @@ export class BanksService {
   }
 
   /**
+   * Renames the host's own bank; 404 for missing/foreign (same error).
+   * Returns the updated Bank with fresh counters.
+   */
+  async renameBank(
+    userId: string,
+    bankId: string,
+    name: string,
+  ): Promise<BankListItem> {
+    const { count } = await this.prisma.bank.updateMany({
+      where: { id: bankId, userId },
+      data: { name },
+    });
+    if (count === 0) {
+      throw new NotFoundException('Bank not found');
+    }
+    return this.bankItem(userId, bankId);
+  }
+
+  /** Single Bank (list-item shape) with DB-computed counters. */
+  private async bankItem(
+    userId: string,
+    bankId: string,
+  ): Promise<BankListItem> {
+    const bank = await this.prisma.bank.findFirst({
+      where: { id: bankId, userId },
+      include: { _count: { select: { questions: true } } },
+    });
+    if (!bank) {
+      throw new NotFoundException('Bank not found');
+    }
+    const readyCount = await this.prisma.question.count({
+      where: { bankId, answerSet: { status: { in: READY_STATUSES } } },
+    });
+    return {
+      id: bank.id,
+      name: bank.name,
+      questionCount: bank._count.questions,
+      readyCount,
+      createdAt: bank.createdAt,
+      updatedAt: bank.updatedAt,
+    };
+  }
+
+  /**
    * Banks of the current host only, newest first. Both counters are computed
    * by PostgreSQL: questionCount via relation count, readyCount via a grouped
    * count of questions whose answer set is accepted/edited.
