@@ -4,6 +4,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
 import { BanksModule } from './banks/banks.module';
+import { ImagesModule } from './images/images.module';
 import { QuestionsModule } from './questions/questions.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
@@ -18,6 +19,7 @@ import { ResultsModule } from './results/results.module';
     RedisModule,
     AuthModule,
     BanksModule,
+    ImagesModule,
     QuestionsModule,
     RoomsModule,
     GameModule,

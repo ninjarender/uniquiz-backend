@@ -28,3 +28,6 @@ npm-debug.log*
 *.sublime-workspace
 
 /generated/prisma
+
+# uploaded images (local MVP storage)
+/uploads

@@ -1,9 +1,15 @@
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { setupApp } from './app.setup';
+import { UPLOADS_DIR, UPLOADS_URL_PREFIX } from './images/images.constants';
 
 async function bootstrap() {
-  const app = setupApp(await NestFactory.create(AppModule));
+  const app = setupApp(
+    await NestFactory.create<NestExpressApplication>(AppModule),
+  );
+  // MVP: uploaded images served by the app itself; nginx takes over in prod.
+  app.useStaticAssets(UPLOADS_DIR, { prefix: UPLOADS_URL_PREFIX });
   await app.listen(process.env.PORT ?? 3000);
 }
 void bootstrap();
