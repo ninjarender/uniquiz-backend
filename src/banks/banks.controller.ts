@@ -1,8 +1,16 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import type { JwtPayload } from '../auth/jwt-payload';
-import { BankListItem, BanksService } from './banks.service';
+import { BankDetailed, BankListItem, BanksService } from './banks.service';
 import { BankNameDto } from './dto/bank-name.dto';
 
 @UseGuards(JwtAuthGuard)
@@ -23,5 +31,14 @@ export class BanksController {
   @Get()
   list(@CurrentUser() payload: JwtPayload): Promise<BankListItem[]> {
     return this.banksService.listBanks(payload.sub);
+  }
+
+  /** GET /banks/{bankId} → 200 BankDetailed | 401 | 404 (foreign = missing). */
+  @Get(':bankId')
+  get(
+    @CurrentUser() payload: JwtPayload,
+    @Param('bankId', ParseUUIDPipe) bankId: string,
+  ): Promise<BankDetailed> {
+    return this.banksService.getBank(payload.sub, bankId);
   }
 }

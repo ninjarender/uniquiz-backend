@@ -1,6 +1,30 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { AnswerSetStatus } from '../../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
+
+/** Host-view answer set per the OpenAPI AnswerSet schema. */
+export interface AnswerSetView {
+  id: string;
+  questionId: string;
+  options: string[];
+  correctIndex: number;
+  spareDistractor: string;
+  explanation: string;
+  status: string;
+  selfCheckPassed: boolean;
+  generatedAt: Date;
+  reviewedAt?: Date;
+}
+
+/** Host-view question per the OpenAPI Question schema. */
+export interface QuestionView {
+  id: string;
+  bankId: string;
+  text: string;
+  imageUrl?: string;
+  referenceAnswer?: string;
+  answerSet?: AnswerSetView;
+}
 
 /** Bank list item per the OpenAPI Bank schema. */
 export interface BankListItem {
@@ -10,6 +34,11 @@ export interface BankListItem {
   readyCount: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/** BankDetailed: bank plus its questions with host-view answer sets. */
+export interface BankDetailed extends BankListItem {
+  questions: QuestionView[];
 }
 
 /** Answer-set statuses that make a question playable (accepted/edited). */
@@ -32,6 +61,63 @@ export class BanksService {
       readyCount: 0,
       createdAt: bank.createdAt,
       updatedAt: bank.updatedAt,
+    };
+  }
+
+  /**
+   * Bank of the current host with all questions and their host-view answer
+   * sets (correctIndex, explanation, spare distractor included - host content).
+   * 404 when the bank does not exist or belongs to another host (same error).
+   */
+  async getBank(userId: string, bankId: string): Promise<BankDetailed> {
+    const bank = await this.prisma.bank.findFirst({
+      where: { id: bankId, userId },
+      include: {
+        _count: { select: { questions: true } },
+        questions: {
+          orderBy: { createdAt: 'asc' },
+          include: { answerSet: true },
+        },
+      },
+    });
+    if (!bank) {
+      throw new NotFoundException('Bank not found');
+    }
+
+    const questions: QuestionView[] = bank.questions.map((question) => ({
+      id: question.id,
+      bankId: question.bankId,
+      text: question.text,
+      imageUrl: question.imageUrl ?? undefined,
+      referenceAnswer: question.referenceAnswer ?? undefined,
+      answerSet: question.answerSet
+        ? {
+            id: question.answerSet.id,
+            questionId: question.answerSet.questionId,
+            options: question.answerSet.options,
+            correctIndex: question.answerSet.correctIndex,
+            spareDistractor: question.answerSet.spareDistractor,
+            explanation: question.answerSet.explanation,
+            status: question.answerSet.status,
+            selfCheckPassed: question.answerSet.selfCheckPassed,
+            generatedAt: question.answerSet.generatedAt,
+            reviewedAt: question.answerSet.reviewedAt ?? undefined,
+          }
+        : undefined,
+    }));
+
+    return {
+      id: bank.id,
+      name: bank.name,
+      questionCount: bank._count.questions,
+      readyCount: questions.filter(
+        (question) =>
+          question.answerSet !== undefined &&
+          READY_STATUSES.includes(question.answerSet.status as AnswerSetStatus),
+      ).length,
+      createdAt: bank.createdAt,
+      updatedAt: bank.updatedAt,
+      questions,
     };
   }
 

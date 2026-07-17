@@ -1,4 +1,5 @@
 import { Test } from '@nestjs/testing';
+import { NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { BanksService } from './banks.service';
 
@@ -6,6 +7,7 @@ describe('BanksService', () => {
   let service: BanksService;
   const bankFindMany = jest.fn();
   const bankCreate = jest.fn();
+  const bankFindFirst = jest.fn();
   const questionGroupBy = jest.fn();
 
   beforeEach(async () => {
@@ -16,7 +18,11 @@ describe('BanksService', () => {
         {
           provide: PrismaService,
           useValue: {
-            bank: { findMany: bankFindMany, create: bankCreate },
+            bank: {
+              findMany: bankFindMany,
+              create: bankCreate,
+              findFirst: bankFindFirst,
+            },
             question: { groupBy: questionGroupBy },
           },
         },
@@ -115,6 +121,67 @@ describe('BanksService', () => {
       expect(bankCreate).toHaveBeenCalledWith({
         data: { userId: 'host-1', name: 'Biology' },
       });
+    });
+  });
+
+  describe('getBank', () => {
+    it('404 for a missing or foreign bank (same error)', async () => {
+      bankFindFirst.mockResolvedValue(null);
+
+      await expect(service.getBank('host-1', 'bank-x')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('maps BankDetailed with host-view answer sets and ready count', async () => {
+      const now = new Date();
+      bankFindFirst.mockResolvedValue({
+        id: 'bank-a',
+        userId: 'host-1',
+        name: 'Lexis',
+        createdAt: now,
+        updatedAt: now,
+        _count: { questions: 2 },
+        questions: [
+          {
+            id: 'q-1',
+            bankId: 'bank-a',
+            text: 'Apple?',
+            imageUrl: null,
+            referenceAnswer: 'fruit',
+            createdAt: now,
+            answerSet: {
+              id: 'set-1',
+              questionId: 'q-1',
+              options: ['a', 'b', 'c', 'd'],
+              correctIndex: 2,
+              spareDistractor: 'e',
+              explanation: 'why',
+              status: 'accepted',
+              selfCheckPassed: true,
+              generatedAt: now,
+              reviewedAt: null,
+            },
+          },
+          {
+            id: 'q-2',
+            bankId: 'bank-a',
+            text: 'Pear?',
+            imageUrl: 'https://img/2.png',
+            referenceAnswer: null,
+            createdAt: now,
+            answerSet: null,
+          },
+        ],
+      });
+
+      const bank = await service.getBank('host-1', 'bank-a');
+
+      expect(bank.questionCount).toBe(2);
+      expect(bank.readyCount).toBe(1);
+      expect(bank.questions[0].answerSet?.correctIndex).toBe(2);
+      expect(bank.questions[1].answerSet).toBeUndefined();
+      expect(bank.questions[1].imageUrl).toBe('https://img/2.png');
     });
   });
 });
