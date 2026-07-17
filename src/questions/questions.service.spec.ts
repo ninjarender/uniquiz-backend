@@ -10,6 +10,8 @@ describe('QuestionsService', () => {
   const questionUpdateMany = jest.fn();
   const questionFindUnique = jest.fn();
   const questionFindFirst = jest.fn();
+  const questionDeleteMany = jest.fn();
+  const answerSetDeleteMany = jest.fn();
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -25,7 +27,11 @@ describe('QuestionsService', () => {
               updateMany: questionUpdateMany,
               findUnique: questionFindUnique,
               findFirst: questionFindFirst,
+              deleteMany: questionDeleteMany,
             },
+            answerSet: { deleteMany: answerSetDeleteMany },
+            $transaction: (operations: Promise<unknown>[]) =>
+              Promise.all(operations),
           },
         },
       ],
@@ -160,6 +166,32 @@ describe('QuestionsService', () => {
       expect(question.text).toBe('Edited text');
       expect(question.answerSet?.id).toBe('set-1');
       expect(question.answerSet?.status).toBe('accepted'); // untouched
+    });
+  });
+
+  describe('deleteQuestion', () => {
+    it('deletes the question with its answer set in one transaction', async () => {
+      answerSetDeleteMany.mockResolvedValue({ count: 1 });
+      questionDeleteMany.mockResolvedValue({ count: 1 });
+
+      await expect(
+        service.deleteQuestion('host-1', 'q-1'),
+      ).resolves.toBeUndefined();
+      expect(answerSetDeleteMany).toHaveBeenCalledWith({
+        where: { questionId: 'q-1', question: { bank: { userId: 'host-1' } } },
+      });
+      expect(questionDeleteMany).toHaveBeenCalledWith({
+        where: { id: 'q-1', bank: { userId: 'host-1' } },
+      });
+    });
+
+    it('404 when the question is missing or foreign', async () => {
+      answerSetDeleteMany.mockResolvedValue({ count: 0 });
+      questionDeleteMany.mockResolvedValue({ count: 0 });
+
+      await expect(service.deleteQuestion('host-1', 'q-x')).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 });

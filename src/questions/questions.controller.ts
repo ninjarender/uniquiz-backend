@@ -1,6 +1,9 @@
 import {
   Body,
   Controller,
+  Delete,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -37,5 +40,15 @@ export class QuestionsController {
     @Body() body: UpdateQuestionDto,
   ): Promise<QuestionView> {
     return this.questionsService.updateQuestion(payload.sub, questionId, body);
+  }
+
+  /** DELETE /questions/{questionId} → 204 (with its answer set) | 401 | 404. */
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Delete('questions/:questionId')
+  remove(
+    @CurrentUser() payload: JwtPayload,
+    @Param('questionId', ParseUUIDPipe) questionId: string,
+  ): Promise<void> {
+    return this.questionsService.deleteQuestion(payload.sub, questionId);
   }
 }
