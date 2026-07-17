@@ -51,16 +51,32 @@ export class QuestionsService {
     questionId: string,
     input: UpdateQuestionDto,
   ): Promise<QuestionView> {
-    const { count } = await this.prisma.question.updateMany({
-      where: { id: questionId, bank: { userId } },
-      data: {
-        text: input.text,
-        imageUrl: input.imageUrl,
-        referenceAnswer: input.referenceAnswer,
-      },
-    });
-    if (count === 0) {
-      throw new NotFoundException('Question not found');
+    const hasChanges =
+      input.text !== undefined ||
+      input.imageUrl !== undefined ||
+      input.referenceAnswer !== undefined;
+
+    if (hasChanges) {
+      const { count } = await this.prisma.question.updateMany({
+        where: { id: questionId, bank: { userId } },
+        data: {
+          text: input.text,
+          imageUrl: input.imageUrl,
+          referenceAnswer: input.referenceAnswer,
+        },
+      });
+      if (count === 0) {
+        throw new NotFoundException('Question not found');
+      }
+    } else {
+      // Empty PATCH: a valid no-op, but ownership must still be enforced.
+      const owned = await this.prisma.question.findFirst({
+        where: { id: questionId, bank: { userId } },
+        select: { id: true },
+      });
+      if (!owned) {
+        throw new NotFoundException('Question not found');
+      }
     }
 
     const question = await this.prisma.question.findUnique({

@@ -260,6 +260,18 @@ export class PrismaMock {
         question.referenceAnswer = data.referenceAnswer;
       return Promise.resolve({ count: 1 });
     },
+    findFirst: ({
+      where,
+    }: {
+      where: { id: string; bank: { userId: string } };
+    }) => {
+      const question = this.questions.find((q) => q.id === where.id);
+      if (!question) return Promise.resolve(null);
+      const owned = this.banks.some(
+        (b) => b.id === question.bankId && b.userId === where.bank.userId,
+      );
+      return Promise.resolve(owned ? { id: question.id } : null);
+    },
     findUnique: ({ where }: { where: { id: string } }) => {
       const question = this.questions.find((q) => q.id === where.id);
       if (!question) return Promise.resolve(null);

@@ -9,6 +9,7 @@ describe('QuestionsService', () => {
   const questionCreate = jest.fn();
   const questionUpdateMany = jest.fn();
   const questionFindUnique = jest.fn();
+  const questionFindFirst = jest.fn();
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -23,6 +24,7 @@ describe('QuestionsService', () => {
               create: questionCreate,
               updateMany: questionUpdateMany,
               findUnique: questionFindUnique,
+              findFirst: questionFindFirst,
             },
           },
         },
@@ -91,6 +93,31 @@ describe('QuestionsService', () => {
   });
 
   describe('updateQuestion', () => {
+    it('empty PATCH is a no-op: no update call, question returned as is', async () => {
+      questionFindFirst.mockResolvedValue({ id: 'q-1' });
+      questionFindUnique.mockResolvedValue({
+        id: 'q-1',
+        bankId: 'bank-a',
+        text: 'Unchanged',
+        imageUrl: null,
+        referenceAnswer: null,
+        answerSet: null,
+      });
+
+      const question = await service.updateQuestion('host-1', 'q-1', {});
+
+      expect(question.text).toBe('Unchanged');
+      expect(questionUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('empty PATCH on a foreign question is still 404', async () => {
+      questionFindFirst.mockResolvedValue(null);
+
+      await expect(
+        service.updateQuestion('host-1', 'q-foreign', {}),
+      ).rejects.toThrow(NotFoundException);
+    });
+
     it('404 when the question is missing or foreign', async () => {
       questionUpdateMany.mockResolvedValue({ count: 0 });
 

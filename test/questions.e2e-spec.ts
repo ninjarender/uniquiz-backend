@@ -131,6 +131,20 @@ describe('Questions endpoints (e2e)', () => {
       expect(question.answerSet?.options).toHaveLength(4);
     });
 
+    it('200: empty body is a valid no-op', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const seeded = prismaMock.seedBank(idA, 'Noop QA', 1, 0);
+      const [questionId] = prismaMock.questionIdsOf(seeded.id);
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/questions/${questionId}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({})
+        .expect(200);
+
+      expect((response.body as { text: string }).text).toBe('Question 1');
+    });
+
     it('404: foreign question cannot be edited', async () => {
       const idA = prismaMock.userIdByEmail(hostA.email);
       const seeded = prismaMock.seedBank(idA, 'Private QA', 1, 0);
