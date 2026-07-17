@@ -22,6 +22,19 @@ const READY_STATUSES: AnswerSetStatus[] = [
 export class BanksService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /** Creates a bank for the current host; a fresh bank has zero counters. */
+  async createBank(userId: string, name: string): Promise<BankListItem> {
+    const bank = await this.prisma.bank.create({ data: { userId, name } });
+    return {
+      id: bank.id,
+      name: bank.name,
+      questionCount: 0,
+      readyCount: 0,
+      createdAt: bank.createdAt,
+      updatedAt: bank.updatedAt,
+    };
+  }
+
   /**
    * Banks of the current host only, newest first. Both counters are computed
    * by PostgreSQL: questionCount via relation count, readyCount via a grouped

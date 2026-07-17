@@ -5,6 +5,7 @@ import { BanksService } from './banks.service';
 describe('BanksService', () => {
   let service: BanksService;
   const bankFindMany = jest.fn();
+  const bankCreate = jest.fn();
   const questionGroupBy = jest.fn();
 
   beforeEach(async () => {
@@ -15,7 +16,7 @@ describe('BanksService', () => {
         {
           provide: PrismaService,
           useValue: {
-            bank: { findMany: bankFindMany },
+            bank: { findMany: bankFindMany, create: bankCreate },
             question: { groupBy: questionGroupBy },
           },
         },
@@ -90,5 +91,30 @@ describe('BanksService', () => {
         where: expect.objectContaining({ bank: { userId: 'host-42' } }),
       }),
     );
+  });
+
+  describe('createBank', () => {
+    it('creates a bank for the host and returns zero counters', async () => {
+      const now = new Date();
+      bankCreate.mockResolvedValue({
+        id: 'bank-new',
+        userId: 'host-1',
+        name: 'Biology',
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      await expect(service.createBank('host-1', 'Biology')).resolves.toEqual({
+        id: 'bank-new',
+        name: 'Biology',
+        questionCount: 0,
+        readyCount: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+      expect(bankCreate).toHaveBeenCalledWith({
+        data: { userId: 'host-1', name: 'Biology' },
+      });
+    });
   });
 });
