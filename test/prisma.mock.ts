@@ -103,6 +103,27 @@ export class PrismaMock {
   $transaction = <T>(operations: Promise<T>[]): Promise<T[]> =>
     Promise.all(operations);
 
+  answerSet = {
+    deleteMany: ({
+      where,
+    }: {
+      where: { question: { bankId: string; bank: { userId: string } } };
+    }) => {
+      const bank = this.banks.find(
+        (b) =>
+          b.id === where.question.bankId &&
+          b.userId === where.question.bank.userId,
+      );
+      if (!bank) return Promise.resolve({ count: 0 });
+      let count = 0;
+      for (const question of this.questions) {
+        if (question.bankId !== bank.id) continue;
+        if (this.answerSets.delete(question.id)) count++;
+      }
+      return Promise.resolve({ count });
+    },
+  };
+
   user = {
     create: ({ data }: { data: { email: string; passwordHash: string } }) => {
       if (this.usersByEmail.has(data.email)) {

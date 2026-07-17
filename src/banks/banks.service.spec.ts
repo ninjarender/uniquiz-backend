@@ -10,6 +10,9 @@ describe('BanksService', () => {
   const bankFindFirst = jest.fn();
   const bankUpdateMany = jest.fn();
   const questionCount = jest.fn();
+  const bankDeleteMany = jest.fn();
+  const questionDeleteMany = jest.fn();
+  const answerSetDeleteMany = jest.fn();
   const questionGroupBy = jest.fn();
 
   beforeEach(async () => {
@@ -25,8 +28,16 @@ describe('BanksService', () => {
               create: bankCreate,
               findFirst: bankFindFirst,
               updateMany: bankUpdateMany,
+              deleteMany: bankDeleteMany,
             },
-            question: { groupBy: questionGroupBy, count: questionCount },
+            answerSet: { deleteMany: answerSetDeleteMany },
+            question: {
+              groupBy: questionGroupBy,
+              count: questionCount,
+              deleteMany: questionDeleteMany,
+            },
+            $transaction: (operations: Promise<unknown>[]) =>
+              Promise.all(operations),
           },
         },
       ],
@@ -224,6 +235,37 @@ describe('BanksService', () => {
         createdAt: now,
         updatedAt: now,
       });
+    });
+  });
+
+  describe('deleteBank', () => {
+    it('deletes answer sets, questions and the bank in one transaction', async () => {
+      answerSetDeleteMany.mockResolvedValue({ count: 3 });
+      questionDeleteMany.mockResolvedValue({ count: 5 });
+      bankDeleteMany.mockResolvedValue({ count: 1 });
+
+      await expect(
+        service.deleteBank('host-1', 'bank-a'),
+      ).resolves.toBeUndefined();
+      expect(answerSetDeleteMany).toHaveBeenCalledWith({
+        where: { question: { bankId: 'bank-a', bank: { userId: 'host-1' } } },
+      });
+      expect(questionDeleteMany).toHaveBeenCalledWith({
+        where: { bankId: 'bank-a', bank: { userId: 'host-1' } },
+      });
+      expect(bankDeleteMany).toHaveBeenCalledWith({
+        where: { id: 'bank-a', userId: 'host-1' },
+      });
+    });
+
+    it('404 when the bank is missing or foreign (nothing deleted)', async () => {
+      answerSetDeleteMany.mockResolvedValue({ count: 0 });
+      questionDeleteMany.mockResolvedValue({ count: 0 });
+      bankDeleteMany.mockResolvedValue({ count: 0 });
+
+      await expect(service.deleteBank('host-1', 'bank-x')).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 });

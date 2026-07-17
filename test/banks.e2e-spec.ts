@@ -228,4 +228,54 @@ describe('Banks endpoints (e2e)', () => {
         .expect(400);
     });
   });
+
+  describe('DELETE /api/v1/banks/{bankId}', () => {
+    it('204: deletes own bank with questions and answer sets (cascade)', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const seeded = prismaMock.seedBank(idA, 'Doomed', 3, 2);
+      const before = prismaMock.counts();
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/banks/${seeded.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(204);
+
+      const after = prismaMock.counts();
+      expect(before.banks - after.banks).toBe(1);
+      expect(before.questions - after.questions).toBe(3);
+      expect(before.answerSets - after.answerSets).toBe(2);
+
+      await request(app.getHttpServer())
+        .get(`/api/v1/banks/${seeded.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(404);
+    });
+
+    it('404: foreign bank cannot be deleted and stays intact', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const foreign = prismaMock.seedBank(idA, 'Protected', 2, 1);
+      const before = prismaMock.counts();
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/banks/${foreign.id}`)
+        .set('Authorization', `Bearer ${tokenB}`)
+        .expect(404);
+
+      expect(prismaMock.counts()).toEqual(before);
+    });
+
+    it('404: repeated deletion of the same bank', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const seeded = prismaMock.seedBank(idA, 'Once', 0, 0);
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/banks/${seeded.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(204);
+      await request(app.getHttpServer())
+        .delete(`/api/v1/banks/${seeded.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(404);
+    });
+  });
 });
