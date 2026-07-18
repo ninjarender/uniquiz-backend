@@ -74,7 +74,7 @@ describe('RoomsService', () => {
   });
 
   it('409 when ready answer sets are fewer than questionCount', async () => {
-    bankFindFirst.mockResolvedValue({ id: 'bank-a' });
+    bankFindFirst.mockResolvedValue({ id: 'bank-a', name: 'Біологія' });
     questionCount.mockResolvedValue(2);
 
     await expect(service.createRoom('host-1', body)).rejects.toThrow(
@@ -83,8 +83,8 @@ describe('RoomsService', () => {
     expect(hsetnx).not.toHaveBeenCalled();
   });
 
-  it('creates a waiting room in Redis and returns roomId + joinUrl', async () => {
-    bankFindFirst.mockResolvedValue({ id: 'bank-a' });
+  it('creates a waiting room in Redis and returns roomId + joinUrl + hostToken', async () => {
+    bankFindFirst.mockResolvedValue({ id: 'bank-a', name: 'Біологія' });
     questionCount.mockResolvedValue(3);
 
     const result = await service.createRoom('host-1', body);
@@ -92,6 +92,8 @@ describe('RoomsService', () => {
     expect(result.roomId).toEqual(expect.any(String));
     expect(result.roomId.length).toBeGreaterThan(0);
     expect(result.joinUrl).toBe(`http://localhost:5173/join/${result.roomId}`);
+    expect(result.hostToken).toEqual(expect.any(String));
+    expect(result.hostToken.length).toBeGreaterThan(0);
     expect(questionCount).toHaveBeenCalledWith({
       where: {
         bankId: 'bank-a',
@@ -102,7 +104,9 @@ describe('RoomsService', () => {
       status: 'waiting',
       userId: 'host-1',
       bankId: 'bank-a',
+      bankName: 'Біологія',
       hostNickname: 'Vadym',
+      hostToken: result.hostToken,
       mode: 'multiplayer',
       questionCount: 3,
       timePerQuestionSeconds: 10,
@@ -116,7 +120,7 @@ describe('RoomsService', () => {
   });
 
   it('retries the room id when the key already exists', async () => {
-    bankFindFirst.mockResolvedValue({ id: 'bank-a' });
+    bankFindFirst.mockResolvedValue({ id: 'bank-a', name: 'Біологія' });
     questionCount.mockResolvedValue(3);
     hsetnx.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
 
