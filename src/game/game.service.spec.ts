@@ -348,7 +348,8 @@ describe('GameService', () => {
           currentIndex: '1',
           questionStartTime: String(questionStartTime),
           roundStatus: 'question_active',
-        });
+        })
+        .mockResolvedValue({});
       hget.mockResolvedValue(
         JSON.stringify({
           index: 1,
@@ -375,6 +376,70 @@ describe('GameService', () => {
       expect(room.currentQuestion!.remainingSeconds).toBeLessThanOrEqual(6);
       expect(room.currentQuestion).not.toHaveProperty('correctIndex');
       expect(room.currentQuestion).not.toHaveProperty('isTrap');
+      expect(room.leaderboard).toEqual([
+        { nickname: 'Olia', totalScore: 0, correctAnswers: 0 },
+      ]);
+    });
+
+    it('rejoin in finished: final leaderboard, no current question', async () => {
+      const answer = (score: number, isCorrect: boolean, elapsedMs: number) =>
+        JSON.stringify({
+          selectedOptionIndex: 0,
+          isSubmitted: true,
+          answerTime: 1,
+          elapsedMs,
+          score,
+          isCorrect,
+          auto: false,
+        });
+      hgetall
+        .mockResolvedValueOnce({
+          ...waitingRoom,
+          status: 'finished',
+          gameId: 'g1',
+        })
+        .mockResolvedValueOnce({
+          'p-1': stored('tok'),
+          'p-2': JSON.stringify({
+            nickname: 'Vadym',
+            isHost: true,
+            connected: true,
+            resumeToken: 'x',
+            joinedAt: 1,
+          }),
+        })
+        // buildLeaderboard: questions hash (index 1 is the trap), then answers
+        .mockResolvedValueOnce({
+          '0': JSON.stringify({ index: 0, isTrap: false }),
+          '1': JSON.stringify({ index: 1, isTrap: true }),
+        })
+        .mockResolvedValueOnce({
+          'p-1': answer(499.79, true, 7),
+          'p-2': answer(440, true, 2000),
+        })
+        .mockResolvedValueOnce({
+          'p-1': answer(0, false, 500),
+          'p-2': answer(500, true, 0),
+        });
+
+      const { room } = await service.rejoinRoom(payload);
+
+      expect(room.status).toBe('finished');
+      expect(room.currentQuestion).toBeUndefined();
+      expect(room.leaderboard).toEqual([
+        {
+          nickname: 'Vadym',
+          totalScore: 940,
+          correctAnswers: 2,
+          avgResponseMs: 2000,
+        },
+        {
+          nickname: 'Olia',
+          totalScore: 500,
+          correctAnswers: 1,
+          avgResponseMs: 7,
+        },
+      ]);
     });
   });
 
