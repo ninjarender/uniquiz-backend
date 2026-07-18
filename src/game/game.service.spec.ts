@@ -238,7 +238,7 @@ describe('GameService', () => {
         playerId: 'p-2',
       });
 
-      expect(result).toEqual({ roomId: 'r1' });
+      expect(result).toEqual({ roomId: 'r1', playerId: 'p-2' });
       expect(Object.keys(writtenPlayers())).toEqual(['p-2']);
       expect(writtenPlayers()['p-2']).toMatchObject({
         connected: false,
@@ -263,6 +263,7 @@ describe('GameService', () => {
 
       expect(result).toEqual({
         roomId: 'r1',
+        playerId: 'p-host',
         hostChanged: { playerId: 'p-3' },
       });
       const written = writtenPlayers();
@@ -287,7 +288,7 @@ describe('GameService', () => {
         playerId: 'p-host',
       });
 
-      expect(result).toEqual({ roomId: 'r1' });
+      expect(result).toEqual({ roomId: 'r1', playerId: 'p-host' });
       expect(writtenPlayers()['p-host']).toMatchObject({
         connected: false,
         isHost: true,

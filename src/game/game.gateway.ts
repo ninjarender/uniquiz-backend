@@ -73,15 +73,21 @@ export class GameGateway implements OnGatewayDisconnect {
   }
 
   /**
-   * Socket drop → offline mark in Redis; if the host dropped, host_changed
-   * with the successor goes to the whole room. (player_connection broadcast
-   * for regular drops - task 0031.)
+   * Socket drop → offline mark in Redis + player_connection(connected=false)
+   * to the room; if the host dropped, host_changed with the successor follows.
    */
   async handleDisconnect(client: GameSocket): Promise<void> {
     const result = await this.gameService
       .handleDisconnect(client.data)
       .catch(() => null);
-    if (result?.hostChanged) {
+    if (!result) {
+      return;
+    }
+    this.server.to(result.roomId).emit('player_connection', {
+      playerId: result.playerId,
+      connected: false,
+    });
+    if (result.hostChanged) {
       this.server.to(result.roomId).emit('host_changed', result.hostChanged);
     }
   }
