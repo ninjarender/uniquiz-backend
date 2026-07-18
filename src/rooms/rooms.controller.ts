@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Get,
   Param,
   Patch,
   Post,
@@ -24,6 +25,12 @@ export class RoomsController {
     @Body() body: RoomCreateDto,
   ): Promise<RoomCreated> {
     return this.roomsService.createRoom(payload.sub, body);
+  }
+
+  /** GET /rooms/{roomId} → 200 RoomPublicInfo | 404. Public: the join page (no token). */
+  @Get(':roomId')
+  getPublicInfo(@Param('roomId') roomId: string): Promise<RoomPublicInfo> {
+    return this.roomsService.getPublicInfo(roomId);
   }
 
   /** PATCH /rooms/{roomId} → 200 RoomPublicInfo | 401 | 404 (foreign) | 409 (not waiting). */
