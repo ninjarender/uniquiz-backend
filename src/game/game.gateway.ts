@@ -1,6 +1,7 @@
 import {
   ConnectedSocket,
   MessageBody,
+  OnGatewayDisconnect,
   SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
@@ -32,11 +33,25 @@ type GameSocket = Socket<
  * via Socket.IO rooms keyed by roomId. Event names are snake_case per contract.
  */
 @WebSocketGateway({ cors: { origin: true } })
-export class GameGateway {
+export class GameGateway implements OnGatewayDisconnect {
   @WebSocketServer()
   server!: Server;
 
   constructor(private readonly gameService: GameService) {}
+
+  /**
+   * Socket drop → offline mark in Redis; if the host dropped, host_changed
+   * with the successor goes to the whole room. (player_connection broadcast
+   * for regular drops - task 0031.)
+   */
+  async handleDisconnect(client: GameSocket): Promise<void> {
+    const result = await this.gameService
+      .handleDisconnect(client.data)
+      .catch(() => null);
+    if (result?.hostChanged) {
+      this.server.to(result.roomId).emit('host_changed', result.hostChanged);
+    }
+  }
 
   /** join_room → join_ack to the joiner + player_joined to the rest of the room. */
   @SubscribeMessage('join_room')
