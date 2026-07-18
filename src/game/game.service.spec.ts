@@ -29,7 +29,7 @@ describe('GameService', () => {
   };
 
   beforeEach(async () => {
-    jest.clearAllMocks();
+    jest.resetAllMocks();
     const multi = {
       hset: multiHset,
       hdel: multiHdel,
@@ -612,7 +612,11 @@ describe('GameService', () => {
         .mockResolvedValueOnce(question(false))
         .mockResolvedValueOnce(null)
         .mockResolvedValueOnce(question(true));
-      hlenMock.mockResolvedValue(5);
+      hlenMock
+        .mockResolvedValueOnce(5)
+        .mockResolvedValueOnce(1)
+        .mockResolvedValueOnce(5)
+        .mockResolvedValueOnce(2);
 
       await service.submitAnswer(session, {
         ...payload,
@@ -646,11 +650,28 @@ describe('GameService', () => {
     });
 
     it('the last submission closes the round early', async () => {
+      const playerJson = JSON.stringify({
+        nickname: 'Olia',
+        isHost: false,
+        connected: true,
+        resumeToken: 't',
+        joinedAt: 1,
+      });
       hgetall
         .mockResolvedValueOnce(inGameRoom)
-        .mockResolvedValueOnce(activeState(1000));
-      hget.mockResolvedValueOnce(null).mockResolvedValueOnce(question(false));
-      hlenMock.mockResolvedValueOnce(2).mockResolvedValueOnce(2);
+        .mockResolvedValueOnce(activeState(1000))
+        // closeRound: state re-read, players, answers
+        .mockResolvedValueOnce(activeState(1000))
+        .mockResolvedValueOnce({ 'p-1': playerJson })
+        .mockResolvedValueOnce({ 'p-1': '{"isSubmitted":true}' });
+      hget
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(question(false))
+        .mockResolvedValueOnce(question(false))
+        .mockResolvedValueOnce('10');
+      hlenMock.mockResolvedValueOnce(1).mockResolvedValueOnce(1);
+      const onRoundClosed = jest.fn();
+      service.onRoundClosed = onRoundClosed;
 
       const result = await service.submitAnswer(session, payload);
 
@@ -660,6 +681,105 @@ describe('GameService', () => {
         'roundStatus',
         'round_result',
       );
+      expect(onRoundClosed).toHaveBeenCalledWith({
+        gameId: 'g1',
+        roomId: 'r1',
+        questionIndex: 1,
+      });
+    });
+
+    it('auto within the grace window is accepted and scored as taken at T', async () => {
+      hgetall
+        .mockResolvedValueOnce(inGameRoom)
+        .mockResolvedValueOnce(activeState(11_000));
+      hget.mockResolvedValueOnce(null).mockResolvedValueOnce(question(false));
+      hlenMock.mockResolvedValueOnce(5).mockResolvedValueOnce(1);
+
+      const result = await service.submitAnswer(session, {
+        ...payload,
+        auto: true,
+      });
+
+      expect(result.ack.accepted).toBe(true);
+      const hsetCalls = multiHset.mock.calls as string[][];
+      const stored = JSON.parse(hsetCalls[0][2]) as {
+        elapsedMs: number;
+        score: number;
+      };
+      expect(stored.elapsedMs).toBe(10_000);
+      expect(stored.score).toBe(200);
+    });
+
+    it('auto beyond the grace window → question_finished', async () => {
+      hgetall
+        .mockResolvedValueOnce(inGameRoom)
+        .mockResolvedValueOnce(activeState(12_000));
+
+      await expect(
+        service.submitAnswer(session, { ...payload, auto: true }),
+      ).rejects.toMatchObject({ code: 'question_finished' });
+    });
+  });
+
+  describe('closeRound', () => {
+    it('is idempotent: an already closed round is a no-op', async () => {
+      hgetall.mockResolvedValueOnce({
+        roomId: 'r1',
+        currentIndex: '0',
+        roundStatus: 'round_result',
+      });
+
+      expect(await service.closeRound('g1', 'r1')).toBeNull();
+      expect(hset).not.toHaveBeenCalled();
+    });
+
+    it('records "no answer" for silent players: trap pays 500 and counts correct', async () => {
+      const playerJson = (nickname: string) =>
+        JSON.stringify({
+          nickname,
+          isHost: false,
+          connected: true,
+          resumeToken: 't',
+          joinedAt: 1,
+        });
+      hgetall
+        .mockResolvedValueOnce({
+          roomId: 'r1',
+          currentIndex: '1',
+          questionStartTime: '1',
+          roundStatus: 'question_active',
+        })
+        .mockResolvedValueOnce({
+          'p-1': playerJson('Olia'),
+          'p-2': playerJson('Vadym'),
+        })
+        .mockResolvedValueOnce({ 'p-1': '{"isSubmitted":true}' });
+      hget
+        .mockResolvedValueOnce(JSON.stringify({ index: 1, isTrap: true }))
+        .mockResolvedValueOnce('10');
+      const onRoundClosed = jest.fn();
+      service.onRoundClosed = onRoundClosed;
+
+      const result = await service.closeRound('g1', 'r1');
+
+      expect(result).toEqual({ gameId: 'g1', roomId: 'r1', questionIndex: 1 });
+      expect(hset).toHaveBeenCalledWith(
+        'game:g1:state',
+        'roundStatus',
+        'round_result',
+      );
+      const hsetCalls = multiHset.mock.calls as string[][];
+      expect(hsetCalls).toHaveLength(1);
+      expect(hsetCalls[0][0]).toBe('game:g1:answers:1');
+      expect(hsetCalls[0][1]).toBe('p-2');
+      expect(JSON.parse(hsetCalls[0][2])).toMatchObject({
+        selectedOptionIndex: null,
+        isSubmitted: false,
+        elapsedMs: 10_000,
+        score: 500,
+        isCorrect: true,
+      });
+      expect(onRoundClosed).toHaveBeenCalledWith(result);
     });
   });
 
@@ -742,6 +862,26 @@ describe('GameService', () => {
         code: 'start_conditions_not_met',
       });
       expect(multiHset).not.toHaveBeenCalled();
+    });
+
+    it('arms the round timer for the first question', async () => {
+      jest.useFakeTimers();
+      try {
+        hgetall
+          .mockResolvedValueOnce({ ...waitingRoom, questionCount: '2' })
+          .mockResolvedValueOnce(twoPlayers);
+        questionFindMany.mockResolvedValue([
+          readyQuestion('q1'),
+          readyQuestion('q2'),
+        ]);
+
+        await service.startGame(session);
+
+        expect(jest.getTimerCount()).toBe(1);
+      } finally {
+        service.onModuleDestroy();
+        jest.useRealTimers();
+      }
     });
 
     it('starts the game: snapshot with one trap, in_game flip, both payloads', async () => {
