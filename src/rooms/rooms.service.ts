@@ -6,9 +6,22 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'crypto';
 import { AnswerSetStatus } from '../../generated/prisma/enums';
+import { GameService } from '../game/game.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
-import { RoomCreateDto } from './dto/room-create.dto';
+import { RoomCreateDto, RoomSettingsDto } from './dto/room-create.dto';
+
+/** RoomPublicInfo per common.yaml: the join page and the PATCH response. */
+export interface RoomPublicInfo {
+  roomId: string;
+  status: string;
+  settings: {
+    mode: string;
+    questionCount: number;
+    timePerQuestionSeconds: number;
+  };
+  bankName: string;
+}
 
 /** RoomCreated response: id, the link the host shares, and the host's secret. */
 export interface RoomCreated {
@@ -33,12 +46,57 @@ export class RoomsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
+    private readonly gameService: GameService,
     config: ConfigService,
   ) {
     this.joinBaseUrl = config.get<string>(
       'PUBLIC_WEB_URL',
       'http://localhost:5173',
     );
+  }
+
+  /**
+   * PATCH /rooms/{roomId}: host-only (foreign room = 404), waiting-only (409).
+   * Updates the Redis room state and announces settings_updated to the lobby.
+   */
+  async updateSettings(
+    userId: string,
+    roomId: string,
+    settings: RoomSettingsDto,
+  ): Promise<RoomPublicInfo> {
+    const roomKey = `room:${roomId}`;
+    const room = await this.redis.client.hgetall(roomKey);
+    if (Object.keys(room).length === 0 || room.userId !== userId) {
+      throw new NotFoundException('Room not found');
+    }
+    if (room.status !== 'waiting') {
+      throw new ConflictException(
+        'Settings can change only while the room is waiting',
+      );
+    }
+
+    await this.redis.client
+      .multi()
+      .hset(roomKey, {
+        mode: settings.mode,
+        questionCount: settings.questionCount,
+        timePerQuestionSeconds: settings.timePerQuestionSeconds,
+      })
+      .expire(roomKey, ROOM_TTL_SECONDS)
+      .exec();
+
+    const updated = {
+      mode: settings.mode as string,
+      questionCount: settings.questionCount,
+      timePerQuestionSeconds: settings.timePerQuestionSeconds,
+    };
+    this.gameService.notifySettingsUpdated(roomId, updated);
+    return {
+      roomId,
+      status: room.status,
+      settings: updated,
+      bankName: room.bankName,
+    };
   }
 
   /**

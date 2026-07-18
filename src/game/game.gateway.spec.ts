@@ -285,6 +285,18 @@ describe('GameGateway', () => {
     expect(serverEmit).toHaveBeenCalledWith('question_started', question);
   });
 
+  it('settings_updated goes out to the room lobby', () => {
+    const settings = {
+      mode: 'solo',
+      questionCount: 7,
+      timePerQuestionSeconds: 15,
+    };
+
+    serviceMock.onSettingsUpdated!('r1', settings);
+
+    expect(serverEmit).toHaveBeenCalledWith('settings_updated', { settings });
+  });
+
   it('game_over goes out to the whole room with the full reveal', () => {
     const payload = { gameId: 'g1', trapQuestionIndex: 1 };
 
