@@ -6,64 +6,19 @@ import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { setupApp } from '../src/app.setup';
 import { PrismaService } from '../src/prisma/prisma.service';
-
-type StoredUser = { id: string; email: string; passwordHash: string };
-
-/**
- * In-memory PrismaService stand-in: emulates the users table with its
- * unique-email constraint (rejects with code P2002, like PostgreSQL + Prisma).
- */
-class PrismaMock {
-  private readonly usersByEmail = new Map<string, StoredUser>();
-
-  user = {
-    create: ({ data }: { data: { email: string; passwordHash: string } }) => {
-      if (this.usersByEmail.has(data.email)) {
-        return Promise.reject(
-          Object.assign(new Error('Unique constraint failed on email'), {
-            code: 'P2002',
-          }),
-        );
-      }
-      const user: StoredUser = {
-        id: `user-${this.usersByEmail.size + 1}`,
-        email: data.email,
-        passwordHash: data.passwordHash,
-      };
-      this.usersByEmail.set(data.email, user);
-      return Promise.resolve({ id: user.id, email: user.email });
-    },
-    findUnique: ({
-      where,
-      select,
-    }: {
-      where: { email?: string; id?: string };
-      select?: Partial<Record<keyof StoredUser, boolean>>;
-    }) => {
-      const user =
-        where.email !== undefined
-          ? this.usersByEmail.get(where.email)
-          : [...this.usersByEmail.values()].find((u) => u.id === where.id);
-      if (!user) return Promise.resolve(null);
-      if (!select) return Promise.resolve({ ...user });
-      const projected: Partial<StoredUser> = {};
-      for (const key of Object.keys(select) as (keyof StoredUser)[]) {
-        if (select[key]) projected[key] = user[key];
-      }
-      return Promise.resolve(projected);
-    },
-  };
-}
+import { PrismaMock } from './prisma.mock';
 
 describe('Auth endpoints (e2e)', () => {
   let app: INestApplication<App>;
+  let prismaMock: PrismaMock;
 
   beforeAll(async () => {
     process.env.JWT_SECRET = 'e2e-test-secret';
 
+    prismaMock = new PrismaMock();
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(PrismaService)
-      .useValue(new PrismaMock())
+      .useValue(prismaMock)
       .compile();
 
     app = setupApp(moduleRef.createNestApplication<INestApplication<App>>());
