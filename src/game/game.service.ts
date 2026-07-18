@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { randomBytes, randomInt, randomUUID } from 'crypto';
 import { ChainableCommander } from 'ioredis';
 import { AnswerSetStatus } from '../../generated/prisma/enums';
@@ -111,13 +111,21 @@ export interface SubmitAnswerAck {
  * sent to the player before round_result.
  */
 interface StoredAnswer {
-  selectedOptionIndex: number;
+  /** null - no answer for the whole round ("без відповіді"). */
+  selectedOptionIndex: number | null;
   isSubmitted: boolean;
   answerTime: number;
   elapsedMs: number;
   score: number;
   isCorrect: boolean;
   auto: boolean;
+}
+
+/** Round closure notification for the round_result flow (task 0038). */
+export interface RoundClosedInfo {
+  gameId: string;
+  roomId: string;
+  questionIndex: number;
 }
 
 /**
@@ -143,12 +151,32 @@ const READY_STATUSES: AnswerSetStatus[] = [
 /** Both room keys live 24h without activity (data-model.md); joins refresh it. */
 const ROOM_TTL_SECONDS = 24 * 60 * 60;
 
+/**
+ * Grace window after T for auto-submissions still in flight (the client
+ * auto-sends the last chosen option exactly at the timeout). The server
+ * round timer fires at T + grace; manual submits are rejected after T.
+ */
+const ROUND_GRACE_MS = 1500;
+
 @Injectable()
-export class GameService {
+export class GameService implements OnModuleDestroy {
+  /** In-process round timers per gameId (single-instance MVP). */
+  private readonly roundTimers = new Map<string, NodeJS.Timeout>();
+
+  /** Set by the round_result flow (task 0038) to broadcast closures. */
+  onRoundClosed?: (info: RoundClosedInfo) => void;
+
   constructor(
     private readonly redis: RedisService,
     private readonly prisma: PrismaService,
   ) {}
+
+  onModuleDestroy(): void {
+    for (const timer of this.roundTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.roundTimers.clear();
+  }
 
   /**
    * join_room: only into a waiting room, nickname unique per room
@@ -496,13 +524,19 @@ export class GameService {
     const timeLimitMs = Number(room.timePerQuestionSeconds) * 1000;
     const answerTime = Date.now();
     const elapsedMs = answerTime - questionStartTime;
+    // Manual submits die at T; auto-submits (sent by the client exactly at
+    // the timeout) get the grace window and are scored as taken at T.
+    const lateLimitMs = payload.auto
+      ? timeLimitMs + ROUND_GRACE_MS
+      : timeLimitMs;
     if (
       state.roundStatus !== 'question_active' ||
       payload.questionIndex !== Number(state.currentIndex) ||
-      elapsedMs > timeLimitMs
+      elapsedMs > lateLimitMs
     ) {
       throw new GameError('question_finished', 'This round is already over');
     }
+    const scoredElapsedMs = Math.min(elapsedMs, timeLimitMs);
 
     const answersKey = `game:${payload.gameId}:answers:${payload.questionIndex}`;
     const existing = await this.redis.client.hget(answersKey, playerId);
@@ -528,12 +562,14 @@ export class GameService {
     // at round close - task 0038). Normal: exact 500 - 30/s, no rounding.
     const isCorrect =
       !question.isTrap && payload.selectedOptionIndex === question.correctIndex;
-    const score = isCorrect ? Math.max(500 - (30 * elapsedMs) / 1000, 0) : 0;
+    const score = isCorrect
+      ? Math.max(500 - (30 * scoredElapsedMs) / 1000, 0)
+      : 0;
     const stored: StoredAnswer = {
       selectedOptionIndex: payload.selectedOptionIndex,
       isSubmitted: true,
       answerTime,
-      elapsedMs,
+      elapsedMs: scoredElapsedMs,
       score,
       isCorrect,
       auto: payload.auto ?? false,
@@ -550,8 +586,7 @@ export class GameService {
     ]);
     const allSubmitted = submittedCount >= players;
     if (allSubmitted) {
-      // Early close marker; the round_result flow (0038) picks it up.
-      await this.redis.client.hset(stateKey, 'roundStatus', 'round_result');
+      await this.closeRound(payload.gameId, roomId);
     }
 
     return {
@@ -559,6 +594,86 @@ export class GameService {
       roomId,
       allSubmitted,
     };
+  }
+
+  /**
+   * Closes the current round: idempotent flip to round_result, cancels the
+   * timer, records "no answer" for silent players (normal - 0, trap - 500
+   * and correct, per business-rules.md) and notifies the round_result flow.
+   */
+  async closeRound(
+    gameId: string,
+    roomId: string,
+  ): Promise<RoundClosedInfo | null> {
+    const stateKey = `game:${gameId}:state`;
+    const state = await this.redis.client.hgetall(stateKey);
+    if (state.roundStatus !== 'question_active') {
+      return null;
+    }
+    this.clearRoundTimer(gameId);
+    await this.redis.client.hset(stateKey, 'roundStatus', 'round_result');
+
+    const questionIndex = Number(state.currentIndex);
+    const answersKey = `game:${gameId}:answers:${questionIndex}`;
+    const [players, answered, rawQuestion, timePerQuestionSeconds] =
+      await Promise.all([
+        this.loadPlayers(`room:${roomId}:players`),
+        this.redis.client.hgetall(answersKey),
+        this.redis.client.hget(`game:${gameId}:questions`, state.currentIndex),
+        this.redis.client.hget(`room:${roomId}`, 'timePerQuestionSeconds'),
+      ]);
+    const isTrap = rawQuestion
+      ? (JSON.parse(rawQuestion) as GameQuestionSnapshot).isTrap
+      : false;
+    const silent: StoredAnswer = {
+      selectedOptionIndex: null,
+      isSubmitted: false,
+      answerTime: Date.now(),
+      elapsedMs: Number(timePerQuestionSeconds) * 1000,
+      score: isTrap ? 500 : 0,
+      isCorrect: isTrap,
+      auto: false,
+    };
+    const missing = Object.keys(players).filter(
+      (playerId) => !answered[playerId],
+    );
+    if (missing.length > 0) {
+      const multi = this.redis.client.multi();
+      for (const playerId of missing) {
+        multi.hset(answersKey, playerId, JSON.stringify(silent));
+      }
+      multi.expire(answersKey, ROOM_TTL_SECONDS);
+      await multi.exec();
+    }
+
+    const info: RoundClosedInfo = { gameId, roomId, questionIndex };
+    this.onRoundClosed?.(info);
+    return info;
+  }
+
+  /** Arms the round timer: fires at T + grace and closes the round. */
+  private scheduleRoundTimer(
+    gameId: string,
+    roomId: string,
+    timeLimitSeconds: number,
+  ): void {
+    this.clearRoundTimer(gameId);
+    const timer = setTimeout(
+      () => {
+        this.roundTimers.delete(gameId);
+        void this.closeRound(gameId, roomId).catch(() => undefined);
+      },
+      timeLimitSeconds * 1000 + ROUND_GRACE_MS,
+    );
+    this.roundTimers.set(gameId, timer);
+  }
+
+  private clearRoundTimer(gameId: string): void {
+    const timer = this.roundTimers.get(gameId);
+    if (timer) {
+      clearTimeout(timer);
+      this.roundTimers.delete(gameId);
+    }
   }
 
   /** Player-safe ActiveQuestion of the running game, with the time left. */
@@ -668,6 +783,7 @@ export class GameService {
     await multi.exec();
 
     const timePerQuestionSeconds = Number(room.timePerQuestionSeconds);
+    this.scheduleRoundTimer(gameId, roomId, timePerQuestionSeconds);
     const first = snapshot[0];
     return {
       roomId,
