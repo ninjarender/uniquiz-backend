@@ -47,6 +47,13 @@ export class GameGateway implements OnGatewayDisconnect {
       this.server.to(roomId).emit('game_over', payload);
     this.gameService.onSettingsUpdated = (roomId, settings) =>
       this.server.to(roomId).emit('settings_updated', { settings });
+    this.gameService.onRoomClosingSoon = (roomId, payload) =>
+      this.server.to(roomId).emit('room_closing_soon', payload);
+    this.gameService.onRoomClosed = (roomId, payload) => {
+      this.server.to(roomId).emit('room_closed', payload);
+      // evict the sockets - the room no longer exists
+      this.server.in(roomId).socketsLeave(roomId);
+    };
   }
 
   /**
