@@ -14,7 +14,7 @@ import { GameError } from './game-error';
 import { JoinRoomDto } from './dto/join-room.dto';
 import { RejoinRoomDto } from './dto/rejoin-room.dto';
 import { SubmitAnswerDto } from './dto/submit-answer.dto';
-import { GameService } from './game.service';
+import { GameService, RoundResultData } from './game.service';
 
 /** Per-socket session: which player in which room this connection is. */
 interface SocketSession {
@@ -38,7 +38,38 @@ export class GameGateway implements OnGatewayDisconnect {
   @WebSocketServer()
   server!: Server;
 
-  constructor(private readonly gameService: GameService) {}
+  constructor(private readonly gameService: GameService) {
+    this.gameService.onRoundResult = (data) =>
+      void this.broadcastRoundResult(data);
+    this.gameService.onQuestionStarted = (roomId, question) =>
+      this.server.to(roomId).emit('question_started', question);
+    // onGameOver: game_over broadcast + persistence - task 0039.
+  }
+
+  /**
+   * round_result is personal: each connected player gets their own result
+   * with the shared leaderboard; the correct option is never revealed.
+   */
+  private async broadcastRoundResult(data: RoundResultData): Promise<void> {
+    const sockets = await this.server
+      .in(data.roomId)
+      .fetchSockets()
+      .catch(() => []);
+    for (const socket of sockets) {
+      const session = socket.data as SocketSession;
+      const yourResult = session.playerId
+        ? data.perPlayer[session.playerId]
+        : undefined;
+      if (yourResult) {
+        socket.emit('round_result', {
+          questionIndex: data.questionIndex,
+          yourResult,
+          leaderboard: data.leaderboard,
+          isLast: data.isLast,
+        });
+      }
+    }
+  }
 
   /**
    * Socket drop → offline mark in Redis; if the host dropped, host_changed

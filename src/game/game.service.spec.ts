@@ -7,6 +7,7 @@ describe('GameService', () => {
   let service: GameService;
   const hgetall = jest.fn();
   const hget = jest.fn();
+  const hmget = jest.fn();
   const hset = jest.fn();
   const hlenMock = jest.fn();
   const questionFindMany = jest.fn();
@@ -47,7 +48,14 @@ describe('GameService', () => {
         {
           provide: RedisService,
           useValue: {
-            client: { hgetall, hget, hset, hlen: hlenMock, multi: () => multi },
+            client: {
+              hgetall,
+              hget,
+              hmget,
+              hset,
+              hlen: hlenMock,
+              multi: () => multi,
+            },
           },
         },
         {
@@ -57,6 +65,10 @@ describe('GameService', () => {
       ],
     }).compile();
     service = moduleRef.get(GameService);
+  });
+
+  afterEach(() => {
+    service.onModuleDestroy();
   });
 
   it('room_not_found for a missing room', async () => {
@@ -649,7 +661,7 @@ describe('GameService', () => {
       expect(multiHset).not.toHaveBeenCalled();
     });
 
-    it('the last submission closes the round early', async () => {
+    it('the last submission closes the round early with a round_result', async () => {
       const playerJson = JSON.stringify({
         nickname: 'Olia',
         isHost: false,
@@ -657,21 +669,33 @@ describe('GameService', () => {
         resumeToken: 't',
         joinedAt: 1,
       });
+      const answerJson = JSON.stringify({
+        selectedOptionIndex: 2,
+        isSubmitted: true,
+        answerTime: 1,
+        elapsedMs: 1000,
+        score: 470,
+        isCorrect: true,
+        auto: false,
+      });
       hgetall
         .mockResolvedValueOnce(inGameRoom)
         .mockResolvedValueOnce(activeState(1000))
         // closeRound: state re-read, players, answers
         .mockResolvedValueOnce(activeState(1000))
         .mockResolvedValueOnce({ 'p-1': playerJson })
-        .mockResolvedValueOnce({ 'p-1': '{"isSubmitted":true}' });
+        .mockResolvedValueOnce({ 'p-1': answerJson })
+        // aggregateTotals: questions hash, answers of index 1
+        .mockResolvedValueOnce({ '1': question(false) })
+        .mockResolvedValueOnce({ 'p-1': answerJson });
       hget
         .mockResolvedValueOnce(null)
         .mockResolvedValueOnce(question(false))
-        .mockResolvedValueOnce(question(false))
-        .mockResolvedValueOnce('10');
+        .mockResolvedValueOnce(question(false));
+      hmget.mockResolvedValueOnce(['10', '2']);
       hlenMock.mockResolvedValueOnce(1).mockResolvedValueOnce(1);
-      const onRoundClosed = jest.fn();
-      service.onRoundClosed = onRoundClosed;
+      const onRoundResult = jest.fn();
+      service.onRoundResult = onRoundResult;
 
       const result = await service.submitAnswer(session, payload);
 
@@ -681,11 +705,23 @@ describe('GameService', () => {
         'roundStatus',
         'round_result',
       );
-      expect(onRoundClosed).toHaveBeenCalledWith({
-        gameId: 'g1',
-        roomId: 'r1',
-        questionIndex: 1,
-      });
+      expect(onRoundResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          gameId: 'g1',
+          roomId: 'r1',
+          questionIndex: 1,
+          isLast: true,
+          perPlayer: {
+            'p-1': {
+              selectedOptionIndex: 2,
+              isCorrect: true,
+              score: 470,
+              elapsedMs: 1000,
+              totalScore: 470,
+            },
+          },
+        }),
+      );
     });
 
     it('auto within the grace window is accepted and scored as taken at T', async () => {
@@ -742,6 +778,15 @@ describe('GameService', () => {
           resumeToken: 't',
           joinedAt: 1,
         });
+      const answeredJson = JSON.stringify({
+        selectedOptionIndex: 0,
+        isSubmitted: true,
+        answerTime: 1,
+        elapsedMs: 2000,
+        score: 0,
+        isCorrect: false,
+        auto: false,
+      });
       hgetall
         .mockResolvedValueOnce({
           roomId: 'r1',
@@ -753,12 +798,16 @@ describe('GameService', () => {
           'p-1': playerJson('Olia'),
           'p-2': playerJson('Vadym'),
         })
-        .mockResolvedValueOnce({ 'p-1': '{"isSubmitted":true}' });
-      hget
-        .mockResolvedValueOnce(JSON.stringify({ index: 1, isTrap: true }))
-        .mockResolvedValueOnce('10');
-      const onRoundClosed = jest.fn();
-      service.onRoundClosed = onRoundClosed;
+        .mockResolvedValueOnce({ 'p-1': answeredJson })
+        // aggregateTotals: questions, then answers of index 1
+        .mockResolvedValueOnce({
+          '1': JSON.stringify({ index: 1, isTrap: true }),
+        })
+        .mockResolvedValueOnce({ 'p-1': answeredJson });
+      hget.mockResolvedValueOnce(JSON.stringify({ index: 1, isTrap: true }));
+      hmget.mockResolvedValueOnce(['10', '3']);
+      const onRoundResult = jest.fn();
+      service.onRoundResult = onRoundResult;
 
       const result = await service.closeRound('g1', 'r1');
 
@@ -779,7 +828,87 @@ describe('GameService', () => {
         score: 500,
         isCorrect: true,
       });
-      expect(onRoundClosed).toHaveBeenCalledWith(result);
+      const resultCalls = onRoundResult.mock.calls as [
+        { isLast: boolean; perPlayer: Record<string, object> },
+      ][];
+      const data = resultCalls[0][0];
+      expect(data.isLast).toBe(false);
+      expect(data.perPlayer['p-1']).toEqual({
+        selectedOptionIndex: 0,
+        isCorrect: false,
+        score: 0,
+        elapsedMs: 2000,
+        totalScore: 0,
+      });
+      expect(data.perPlayer['p-2']).toEqual({
+        selectedOptionIndex: null,
+        isCorrect: true,
+        score: 500,
+        elapsedMs: null,
+        totalScore: 0,
+      });
+    });
+
+    it('advanceRound: next question, fresh state and question_started hook', async () => {
+      hgetall.mockResolvedValueOnce({
+        roomId: 'r1',
+        currentIndex: '0',
+        questionStartTime: '1',
+        roundStatus: 'round_result',
+      });
+      hget
+        .mockResolvedValueOnce(
+          JSON.stringify({
+            index: 1,
+            baseQuestionId: 'q2',
+            text: 'Питання 2?',
+            options: ['a', 'b', 'c', 'd'],
+            correctIndex: 0,
+            isTrap: false,
+          }),
+        )
+        .mockResolvedValueOnce('10');
+      const onQuestionStarted = jest.fn();
+      service.onQuestionStarted = onQuestionStarted;
+
+      await service.advanceRound('g1', 'r1');
+
+      expect(multiHset).toHaveBeenCalledWith(
+        'game:g1:state',
+        expect.objectContaining({
+          currentIndex: 1,
+          roundStatus: 'question_active',
+        }),
+      );
+      expect(onQuestionStarted).toHaveBeenCalledWith(
+        'r1',
+        expect.objectContaining({
+          gameId: 'g1',
+          index: 1,
+          text: 'Питання 2?',
+          timeLimitSeconds: 10,
+          questionStartTime: expect.any(Number) as number,
+        }),
+      );
+      const questionCalls = onQuestionStarted.mock.calls as [string, object][];
+      const payload = questionCalls[0][1];
+      expect(payload).not.toHaveProperty('correctIndex');
+      expect(payload).not.toHaveProperty('isTrap');
+    });
+
+    it('advanceRound is a no-op while the round is still active', async () => {
+      hgetall.mockResolvedValueOnce({
+        roomId: 'r1',
+        currentIndex: '0',
+        roundStatus: 'question_active',
+      });
+      const onQuestionStarted = jest.fn();
+      service.onQuestionStarted = onQuestionStarted;
+
+      await service.advanceRound('g1', 'r1');
+
+      expect(multiHset).not.toHaveBeenCalled();
+      expect(onQuestionStarted).not.toHaveBeenCalled();
     });
   });
 
