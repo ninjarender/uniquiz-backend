@@ -125,4 +125,63 @@ describe('Banks endpoints (e2e)', () => {
         .expect(400);
     });
   });
+
+  describe('GET /api/v1/banks/{bankId}', () => {
+    it('200: BankDetailed with questions and host-view answer sets', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const seeded = prismaMock.seedBank(idA, 'Detailed', 3, 2);
+
+      const response = await request(app.getHttpServer())
+        .get(`/api/v1/banks/${seeded.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(200);
+
+      const bank = response.body as {
+        id: string;
+        questionCount: number;
+        readyCount: number;
+        questions: {
+          text: string;
+          answerSet?: { correctIndex: number; options: string[] };
+        }[];
+      };
+      expect(bank.id).toBe(seeded.id);
+      expect(bank.questionCount).toBe(3);
+      expect(bank.readyCount).toBe(2);
+      expect(bank.questions).toHaveLength(3);
+      expect(bank.questions[0].answerSet?.options).toHaveLength(4);
+      expect(bank.questions[2].answerSet).toBeUndefined();
+    });
+
+    it('404: foreign bank is indistinguishable from a missing one', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const foreign = prismaMock.seedBank(idA, 'Private', 1, 0);
+
+      const foreignResponse = await request(app.getHttpServer())
+        .get(`/api/v1/banks/${foreign.id}`)
+        .set('Authorization', `Bearer ${tokenB}`)
+        .expect(404);
+      const missingResponse = await request(app.getHttpServer())
+        .get('/api/v1/banks/00000000-0000-4000-8000-000000000000')
+        .set('Authorization', `Bearer ${tokenB}`)
+        .expect(404);
+
+      const messageOf = (r: { body: unknown }) =>
+        (r.body as { message: string }).message;
+      expect(messageOf(foreignResponse)).toBe(messageOf(missingResponse));
+    });
+
+    it('400: malformed uuid is rejected', async () => {
+      await request(app.getHttpServer())
+        .get('/api/v1/banks/not-a-uuid')
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(400);
+    });
+
+    it('401: requires a bearer token', async () => {
+      await request(app.getHttpServer())
+        .get('/api/v1/banks/00000000-0000-4000-8000-000000000000')
+        .expect(401);
+    });
+  });
 });
