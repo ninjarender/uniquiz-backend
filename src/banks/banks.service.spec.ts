@@ -8,6 +8,8 @@ describe('BanksService', () => {
   const bankFindMany = jest.fn();
   const bankCreate = jest.fn();
   const bankFindFirst = jest.fn();
+  const bankUpdateMany = jest.fn();
+  const questionCount = jest.fn();
   const questionGroupBy = jest.fn();
 
   beforeEach(async () => {
@@ -22,8 +24,9 @@ describe('BanksService', () => {
               findMany: bankFindMany,
               create: bankCreate,
               findFirst: bankFindFirst,
+              updateMany: bankUpdateMany,
             },
-            question: { groupBy: questionGroupBy },
+            question: { groupBy: questionGroupBy, count: questionCount },
           },
         },
       ],
@@ -182,6 +185,45 @@ describe('BanksService', () => {
       expect(bank.questions[0].answerSet?.correctIndex).toBe(2);
       expect(bank.questions[1].answerSet).toBeUndefined();
       expect(bank.questions[1].imageUrl).toBe('https://img/2.png');
+    });
+  });
+
+  describe('renameBank', () => {
+    it('404 when the bank is missing or foreign', async () => {
+      bankUpdateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        service.renameBank('host-1', 'bank-x', 'New name'),
+      ).rejects.toThrow(NotFoundException);
+      expect(bankUpdateMany).toHaveBeenCalledWith({
+        where: { id: 'bank-x', userId: 'host-1' },
+        data: { name: 'New name' },
+      });
+    });
+
+    it('renames own bank and returns fresh counters', async () => {
+      const now = new Date();
+      bankUpdateMany.mockResolvedValue({ count: 1 });
+      bankFindFirst.mockResolvedValue({
+        id: 'bank-a',
+        userId: 'host-1',
+        name: 'Renamed',
+        createdAt: now,
+        updatedAt: now,
+        _count: { questions: 4 },
+      });
+      questionCount.mockResolvedValue(2);
+
+      await expect(
+        service.renameBank('host-1', 'bank-a', 'Renamed'),
+      ).resolves.toEqual({
+        id: 'bank-a',
+        name: 'Renamed',
+        questionCount: 4,
+        readyCount: 2,
+        createdAt: now,
+        updatedAt: now,
+      });
     });
   });
 });

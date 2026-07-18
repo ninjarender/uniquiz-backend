@@ -184,4 +184,48 @@ describe('Banks endpoints (e2e)', () => {
         .expect(401);
     });
   });
+
+  describe('PATCH /api/v1/banks/{bankId}', () => {
+    it('200: renames own bank, counters intact', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const seeded = prismaMock.seedBank(idA, 'Old name', 2, 1);
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/banks/${seeded.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ name: 'New name' })
+        .expect(200);
+
+      const bank = response.body as {
+        name: string;
+        questionCount: number;
+        readyCount: number;
+      };
+      expect(bank.name).toBe('New name');
+      expect(bank.questionCount).toBe(2);
+      expect(bank.readyCount).toBe(1);
+    });
+
+    it('404: foreign bank cannot be renamed', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const foreign = prismaMock.seedBank(idA, 'Keep me', 0, 0);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/banks/${foreign.id}`)
+        .set('Authorization', `Bearer ${tokenB}`)
+        .send({ name: 'Hacked' })
+        .expect(404);
+    });
+
+    it('400: empty name is rejected', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const seeded = prismaMock.seedBank(idA, 'Valid', 0, 0);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/banks/${seeded.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ name: '' })
+        .expect(400);
+    });
+  });
 });

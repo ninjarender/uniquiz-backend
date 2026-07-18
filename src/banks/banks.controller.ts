@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -40,5 +41,15 @@ export class BanksController {
     @Param('bankId', ParseUUIDPipe) bankId: string,
   ): Promise<BankDetailed> {
     return this.banksService.getBank(payload.sub, bankId);
+  }
+
+  /** PATCH /banks/{bankId} → 200 updated Bank | 401 | 404. */
+  @Patch(':bankId')
+  rename(
+    @CurrentUser() payload: JwtPayload,
+    @Param('bankId', ParseUUIDPipe) bankId: string,
+    @Body() body: BankNameDto,
+  ): Promise<BankListItem> {
+    return this.banksService.renameBank(payload.sub, bankId, body.name);
   }
 }
