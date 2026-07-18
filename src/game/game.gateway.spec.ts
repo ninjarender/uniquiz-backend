@@ -309,9 +309,10 @@ describe('GameGateway', () => {
     expect(serverEmit).not.toHaveBeenCalled();
   });
 
-  it('disconnect of the host → host_changed to the room', async () => {
+  it('disconnect of the host → player_connection(false) then host_changed', async () => {
     handleDisconnect.mockResolvedValue({
       roomId: 'r1',
+      playerId: 'p-1',
       hostChanged: { playerId: 'p-2' },
     });
     const socket = client();
@@ -324,13 +325,24 @@ describe('GameGateway', () => {
       roomId: 'r1',
       playerId: 'p-1',
     });
-    expect(serverEmit).toHaveBeenCalledWith('host_changed', {
-      playerId: 'p-2',
-    });
+    expect(serverEmit.mock.calls).toEqual([
+      ['player_connection', { playerId: 'p-1', connected: false }],
+      ['host_changed', { playerId: 'p-2' }],
+    ]);
   });
 
-  it('disconnect of a regular player → no host_changed', async () => {
-    handleDisconnect.mockResolvedValue({ roomId: 'r1' });
+  it('disconnect of a regular player → player_connection(false) only', async () => {
+    handleDisconnect.mockResolvedValue({ roomId: 'r1', playerId: 'p-1' });
+
+    await gateway.handleDisconnect(client());
+
+    expect(serverEmit.mock.calls).toEqual([
+      ['player_connection', { playerId: 'p-1', connected: false }],
+    ]);
+  });
+
+  it('disconnect of a socket without membership → no broadcasts', async () => {
+    handleDisconnect.mockResolvedValue(null);
 
     await gateway.handleDisconnect(client());
 

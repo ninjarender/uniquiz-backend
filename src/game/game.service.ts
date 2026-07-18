@@ -71,6 +71,7 @@ export interface PlayerRefPayload {
 /** What the gateway broadcasts after a socket drops. */
 export interface DisconnectResult {
   roomId: string;
+  playerId: string;
   hostChanged?: PlayerRefPayload;
 }
 
@@ -483,7 +484,7 @@ export class GameService implements OnModuleDestroy {
     }
     await multi.exec();
 
-    return { roomId, ...(hostChanged && { hostChanged }) };
+    return { roomId, playerId, ...(hostChanged && { hostChanged }) };
   }
 
   /**
