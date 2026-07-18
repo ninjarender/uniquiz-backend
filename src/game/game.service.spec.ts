@@ -10,6 +10,7 @@ describe('GameService', () => {
   const questionFindMany = jest.fn();
   const multiExec = jest.fn();
   const multiHset = jest.fn();
+  const multiHdel = jest.fn();
   const multiExpire = jest.fn();
 
   const waitingRoom = {
@@ -27,8 +28,14 @@ describe('GameService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
-    const multi = { hset: multiHset, expire: multiExpire, exec: multiExec };
+    const multi = {
+      hset: multiHset,
+      hdel: multiHdel,
+      expire: multiExpire,
+      exec: multiExec,
+    };
     multiHset.mockReturnValue(multi);
+    multiHdel.mockReturnValue(multi);
     multiExpire.mockReturnValue(multi);
     multiExec.mockResolvedValue([]);
 
@@ -364,6 +371,81 @@ describe('GameService', () => {
       expect(room.currentQuestion!.remainingSeconds).toBeLessThanOrEqual(6);
       expect(room.currentQuestion).not.toHaveProperty('correctIndex');
       expect(room.currentQuestion).not.toHaveProperty('isTrap');
+    });
+  });
+
+  describe('leaveRoom', () => {
+    const stored = (
+      nickname: string,
+      isHost: boolean,
+      connected: boolean,
+      joinedAt: number,
+    ) =>
+      JSON.stringify({
+        nickname,
+        isHost,
+        connected,
+        resumeToken: 't',
+        joinedAt,
+      });
+
+    it('not_a_member without a session and for a non-member', async () => {
+      await expect(service.leaveRoom({})).rejects.toMatchObject({
+        code: 'not_a_member',
+      });
+
+      hgetall.mockResolvedValueOnce(waitingRoom).mockResolvedValueOnce({});
+      await expect(
+        service.leaveRoom({ roomId: 'r1', playerId: 'ghost' }),
+      ).rejects.toMatchObject({ code: 'not_a_member' });
+      expect(multiHdel).not.toHaveBeenCalled();
+    });
+
+    it('room_not_waiting during a running game', async () => {
+      hgetall.mockResolvedValueOnce({ ...waitingRoom, status: 'in_game' });
+
+      await expect(
+        service.leaveRoom({ roomId: 'r1', playerId: 'p-2' }),
+      ).rejects.toMatchObject({ code: 'room_not_waiting' });
+    });
+
+    it('a regular player leaves: removed, no host change', async () => {
+      hgetall.mockResolvedValueOnce(waitingRoom).mockResolvedValueOnce({
+        'p-host': stored('Vadym', true, true, 1),
+        'p-2': stored('Olia', false, true, 2),
+      });
+
+      const result = await service.leaveRoom({ roomId: 'r1', playerId: 'p-2' });
+
+      expect(result).toEqual({ roomId: 'r1', playerLeft: { playerId: 'p-2' } });
+      expect(multiHdel).toHaveBeenCalledWith('room:r1:players', 'p-2');
+      expect(multiHset).not.toHaveBeenCalled();
+    });
+
+    it('the host leaves: earliest-joined connected player inherits the role', async () => {
+      hgetall.mockResolvedValueOnce(waitingRoom).mockResolvedValueOnce({
+        'p-host': stored('Vadym', true, true, 1),
+        'p-2': stored('Olia', false, false, 2),
+        'p-3': stored('Petro', false, true, 3),
+      });
+
+      const result = await service.leaveRoom({
+        roomId: 'r1',
+        playerId: 'p-host',
+      });
+
+      expect(result).toEqual({
+        roomId: 'r1',
+        playerLeft: { playerId: 'p-host' },
+        hostChanged: { playerId: 'p-3' },
+      });
+      expect(multiHdel).toHaveBeenCalledWith('room:r1:players', 'p-host');
+      const hsetCalls = multiHset.mock.calls as string[][];
+      expect(hsetCalls).toHaveLength(1);
+      expect(hsetCalls[0][1]).toBe('p-3');
+      expect((JSON.parse(hsetCalls[0][2]) as { isHost: boolean }).isHost).toBe(
+        true,
+      );
     });
   });
 

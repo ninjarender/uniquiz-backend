@@ -9,13 +9,15 @@ describe('GameGateway', () => {
   const rejoinRoom = jest.fn();
   const startGame = jest.fn();
   const handleDisconnect = jest.fn();
+  const leaveRoom = jest.fn();
+  const leave = jest.fn();
   const serverEmit = jest.fn();
   const emit = jest.fn();
   const roomEmit = jest.fn();
   const join = jest.fn();
   const to = jest.fn(() => ({ emit: roomEmit }));
   const client = () =>
-    ({ data: {}, emit, join, to }) as unknown as Parameters<
+    ({ data: {}, emit, join, leave, to }) as unknown as Parameters<
       GameGateway['handleJoinRoom']
     >[0];
 
@@ -39,7 +41,13 @@ describe('GameGateway', () => {
         GameGateway,
         {
           provide: GameService,
-          useValue: { joinRoom, rejoinRoom, startGame, handleDisconnect },
+          useValue: {
+            joinRoom,
+            rejoinRoom,
+            leaveRoom,
+            startGame,
+            handleDisconnect,
+          },
         },
       ],
     }).compile();
@@ -138,6 +146,38 @@ describe('GameGateway', () => {
       code: 'not_host',
       message: 'Only the host',
     });
+  });
+
+  it('leave_room: player_left (+host_changed) to the room, session cleared', async () => {
+    leaveRoom.mockResolvedValue({
+      roomId: 'r1',
+      playerLeft: { playerId: 'p-1' },
+      hostChanged: { playerId: 'p-2' },
+    });
+    const socket = client();
+    socket.data.roomId = 'r1';
+    socket.data.playerId = 'p-1';
+
+    await gateway.handleLeaveRoom(socket);
+
+    expect(leave).toHaveBeenCalledWith('r1');
+    expect(socket.data).toEqual({ roomId: undefined, playerId: undefined });
+    expect(serverEmit.mock.calls).toEqual([
+      ['player_left', { playerId: 'p-1' }],
+      ['host_changed', { playerId: 'p-2' }],
+    ]);
+  });
+
+  it('leave_room from a non-member → not_a_member error', async () => {
+    leaveRoom.mockRejectedValue(new GameError('not_a_member', 'nope'));
+
+    await gateway.handleLeaveRoom(client());
+
+    expect(emit).toHaveBeenCalledWith('error', {
+      code: 'not_a_member',
+      message: 'nope',
+    });
+    expect(serverEmit).not.toHaveBeenCalled();
   });
 
   it('disconnect of the host → host_changed to the room', async () => {
