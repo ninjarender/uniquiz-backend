@@ -9,14 +9,12 @@ import { App } from 'supertest/types';
 const uploadsDir = mkdtempSync(join(tmpdir(), 'uniquiz-uploads-'));
 process.env.UPLOADS_DIR = uploadsDir;
 
-/* eslint-disable import/first */
 import { Test } from '@nestjs/testing';
 import { AppModule } from '../src/app.module';
 import { setupApp } from '../src/app.setup';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { IMAGE_MAX_BYTES } from '../src/images/images.constants';
 import { PrismaMock } from './prisma.mock';
-/* eslint-enable import/first */
 
 /** Minimal valid PNG header + payload of the requested size. */
 function fakePng(bytes: number): Buffer {
