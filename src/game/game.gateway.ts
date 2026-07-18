@@ -43,7 +43,8 @@ export class GameGateway implements OnGatewayDisconnect {
       void this.broadcastRoundResult(data);
     this.gameService.onQuestionStarted = (roomId, question) =>
       this.server.to(roomId).emit('question_started', question);
-    // onGameOver: game_over broadcast + persistence - task 0039.
+    this.gameService.onGameOver = (roomId, payload) =>
+      this.server.to(roomId).emit('game_over', payload);
   }
 
   /**

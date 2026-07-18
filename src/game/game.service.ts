@@ -1,7 +1,8 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { randomBytes, randomInt, randomUUID } from 'crypto';
 import { ChainableCommander } from 'ioredis';
-import { AnswerSetStatus } from '../../generated/prisma/enums';
+import { Prisma } from '../../generated/prisma/client';
+import { AnswerSetStatus, GameMode } from '../../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { GameError } from './game-error';
@@ -171,6 +172,27 @@ interface GameQuestionSnapshot {
   correctIndex: number | null;
   isTrap: boolean;
   imageUrl?: string;
+  /** Revealed only in the game_over review. */
+  explanation?: string;
+}
+
+/** Per-question reveal in the final review (asyncapi QuestionReview). */
+export interface QuestionReview {
+  index: number;
+  text: string;
+  options: string[];
+  /** null - the trap question (no correct option exists). */
+  correctIndex: number | null;
+  isTrap: boolean;
+  explanation?: string;
+}
+
+/** game_over broadcast (asyncapi GameOverPayload). */
+export interface GameOverPayload {
+  gameId: string;
+  leaderboard: LeaderboardEntry[];
+  trapQuestionIndex: number;
+  review: QuestionReview[];
 }
 
 /** Answer-set statuses that make a question playable (accepted/edited). */
@@ -192,6 +214,9 @@ const ROUND_GRACE_MS = 1500;
 /** Leaderboard pause between round_result and the next question (value TBD). */
 const ROUND_RESULT_PAUSE_MS = 5000;
 
+/** Game snapshot lives ~1h after the game_results insert (data-model.md). */
+const GAME_REVIEW_TTL_SECONDS = 60 * 60;
+
 @Injectable()
 export class GameService implements OnModuleDestroy {
   /** In-process round timers per gameId (single-instance MVP). */
@@ -203,8 +228,8 @@ export class GameService implements OnModuleDestroy {
   /** Set by the gateway: question_started broadcast for the next round. */
   onQuestionStarted?: (roomId: string, question: ActiveQuestionPayload) => void;
 
-  /** Set by the game_over flow (task 0039); fires after the last round's pause. */
-  onGameOver?: (info: { gameId: string; roomId: string }) => void;
+  /** Set by the gateway: game_over broadcast with the full reveal. */
+  onGameOver?: (roomId: string, payload: GameOverPayload) => void;
 
   constructor(
     private readonly redis: RedisService,
@@ -783,6 +808,76 @@ export class GameService implements OnModuleDestroy {
     });
   }
 
+  /**
+   * game_over: full reveal (correct answers, explanations, the trap) plus the
+   * final leaderboard; one INSERT into game_results for the host's history;
+   * room flips to finished and the game snapshot gets a ~1h TTL so the final
+   * screen survives rejoin (data-model.md). Idempotent via the room status.
+   */
+  async finishGame(
+    gameId: string,
+    roomId: string,
+  ): Promise<GameOverPayload | null> {
+    const roomKey = `room:${roomId}`;
+    const room = await this.redis.client.hgetall(roomKey);
+    if (room.status !== 'in_game' || room.gameId !== gameId) {
+      return null;
+    }
+
+    const players = await this.loadPlayers(`${roomKey}:players`);
+    const totals = await this.aggregateTotals(gameId, players);
+    const leaderboard = this.leaderboardFromTotals(players, totals);
+
+    const questionsRaw = await this.redis.client.hgetall(
+      `game:${gameId}:questions`,
+    );
+    const review: QuestionReview[] = Object.values(questionsRaw)
+      .map((json) => JSON.parse(json) as GameQuestionSnapshot)
+      .sort((a, b) => a.index - b.index)
+      .map((question) => ({
+        index: question.index,
+        text: question.text,
+        options: question.options,
+        correctIndex: question.correctIndex,
+        isTrap: question.isTrap,
+        ...(question.explanation !== undefined && {
+          explanation: question.explanation,
+        }),
+      }));
+    const trapQuestionIndex =
+      review.find((question) => question.isTrap)?.index ?? -1;
+
+    await this.prisma.gameResult.create({
+      data: {
+        userId: room.userId,
+        bankId: room.bankId,
+        mode: room.mode as GameMode,
+        questionCount: Number(room.questionCount),
+        finishedAt: new Date(),
+        leaderboard: leaderboard as unknown as Prisma.InputJsonValue,
+      },
+    });
+
+    const multi = this.redis.client
+      .multi()
+      .hset(roomKey, 'status', 'finished')
+      .expire(`game:${gameId}:state`, GAME_REVIEW_TTL_SECONDS)
+      .expire(`game:${gameId}:questions`, GAME_REVIEW_TTL_SECONDS);
+    for (const index of Object.keys(questionsRaw)) {
+      multi.expire(`game:${gameId}:answers:${index}`, GAME_REVIEW_TTL_SECONDS);
+    }
+    await multi.exec();
+
+    const payload: GameOverPayload = {
+      gameId,
+      leaderboard,
+      trapQuestionIndex,
+      review,
+    };
+    this.onGameOver?.(roomId, payload);
+    return payload;
+  }
+
   /** Leaderboard pause, then the next question or the game_over hook. */
   private schedulePauseThenAdvance(
     gameId: string,
@@ -793,7 +888,7 @@ export class GameService implements OnModuleDestroy {
     const timer = setTimeout(() => {
       this.roundTimers.delete(gameId);
       if (isLast) {
-        this.onGameOver?.({ gameId, roomId });
+        void this.finishGame(gameId, roomId).catch(() => undefined);
         return;
       }
       void this.advanceRound(gameId, roomId).catch(() => undefined);
@@ -997,6 +1092,7 @@ export class GameService implements OnModuleDestroy {
         correctIndex: isTrap ? null : correctIndex,
         isTrap,
         ...(question.imageUrl !== null && { imageUrl: question.imageUrl }),
+        explanation: answerSet.explanation,
       };
     });
   }

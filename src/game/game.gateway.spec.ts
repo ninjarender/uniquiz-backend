@@ -285,6 +285,14 @@ describe('GameGateway', () => {
     expect(serverEmit).toHaveBeenCalledWith('question_started', question);
   });
 
+  it('game_over goes out to the whole room with the full reveal', () => {
+    const payload = { gameId: 'g1', trapQuestionIndex: 1 };
+
+    serviceMock.onGameOver!('r1', payload as never);
+
+    expect(serverEmit).toHaveBeenCalledWith('game_over', payload);
+  });
+
   it('disconnect of the host → host_changed to the room', async () => {
     handleDisconnect.mockResolvedValue({
       roomId: 'r1',
