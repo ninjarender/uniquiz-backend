@@ -6,6 +6,7 @@ import { GameService } from './game.service';
 describe('GameService', () => {
   let service: GameService;
   const hgetall = jest.fn();
+  const hget = jest.fn();
   const questionFindMany = jest.fn();
   const multiExec = jest.fn();
   const multiHset = jest.fn();
@@ -36,7 +37,7 @@ describe('GameService', () => {
         GameService,
         {
           provide: RedisService,
-          useValue: { client: { hgetall, multi: () => multi } },
+          useValue: { client: { hgetall, hget, multi: () => multi } },
         },
         {
           provide: PrismaService,
@@ -148,6 +149,105 @@ describe('GameService', () => {
     });
 
     expect(result.player.isHost).toBe(false);
+  });
+
+  describe('rejoinRoom', () => {
+    const stored = (resumeToken: string) =>
+      JSON.stringify({
+        nickname: 'Olia',
+        isHost: false,
+        connected: false,
+        resumeToken,
+      });
+    const payload = { roomId: 'r1', playerId: 'p-1', resumeToken: 'tok' };
+
+    it('room_not_found for a missing room', async () => {
+      hgetall.mockResolvedValue({});
+
+      await expect(service.rejoinRoom(payload)).rejects.toMatchObject({
+        code: 'room_not_found',
+      });
+    });
+
+    it('invalid_resume_token for a wrong token and for an unknown player', async () => {
+      hgetall
+        .mockResolvedValueOnce(waitingRoom)
+        .mockResolvedValueOnce({ 'p-1': stored('other') })
+        .mockResolvedValueOnce(waitingRoom)
+        .mockResolvedValueOnce({});
+
+      await expect(service.rejoinRoom(payload)).rejects.toMatchObject({
+        code: 'invalid_resume_token',
+      });
+      await expect(service.rejoinRoom(payload)).rejects.toMatchObject({
+        code: 'invalid_resume_token',
+      });
+      expect(multiHset).not.toHaveBeenCalled();
+    });
+
+    it('rejoin in the lobby: marks connected, returns the snapshot', async () => {
+      hgetall
+        .mockResolvedValueOnce(waitingRoom)
+        .mockResolvedValueOnce({ 'p-1': stored('tok') });
+
+      const { room, player } = await service.rejoinRoom(payload);
+
+      expect(player).toEqual({
+        id: 'p-1',
+        nickname: 'Olia',
+        isHost: false,
+        connected: true,
+      });
+      expect(room.status).toBe('waiting');
+      expect(room.currentQuestion).toBeUndefined();
+      const hsetCalls = multiHset.mock.calls as string[][];
+      expect(
+        (JSON.parse(hsetCalls[0][2]) as { connected: boolean }).connected,
+      ).toBe(true);
+    });
+
+    it('rejoin mid-round: snapshot carries the question with remainingSeconds', async () => {
+      const questionStartTime = Date.now() - 4_000;
+      hgetall
+        .mockResolvedValueOnce({
+          ...waitingRoom,
+          status: 'in_game',
+          gameId: 'g1',
+        })
+        .mockResolvedValueOnce({ 'p-1': stored('tok') })
+        .mockResolvedValueOnce({
+          roomId: 'r1',
+          currentIndex: '1',
+          questionStartTime: String(questionStartTime),
+          roundStatus: 'question_active',
+        });
+      hget.mockResolvedValue(
+        JSON.stringify({
+          index: 1,
+          baseQuestionId: 'q2',
+          text: 'Питання 2?',
+          options: ['a', 'b', 'c', 'd'],
+          correctIndex: 2,
+          isTrap: false,
+        }),
+      );
+
+      const { room } = await service.rejoinRoom(payload);
+
+      expect(hget).toHaveBeenCalledWith('game:g1:questions', '1');
+      expect(room.currentQuestion).toMatchObject({
+        gameId: 'g1',
+        index: 1,
+        text: 'Питання 2?',
+        options: ['a', 'b', 'c', 'd'],
+        timeLimitSeconds: 10,
+        questionStartTime,
+      });
+      expect(room.currentQuestion!.remainingSeconds).toBeGreaterThan(4);
+      expect(room.currentQuestion!.remainingSeconds).toBeLessThanOrEqual(6);
+      expect(room.currentQuestion).not.toHaveProperty('correctIndex');
+      expect(room.currentQuestion).not.toHaveProperty('isTrap');
+    });
   });
 
   describe('startGame', () => {
