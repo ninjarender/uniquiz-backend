@@ -11,6 +11,7 @@ describe('GameService', () => {
   const hset = jest.fn();
   const hlenMock = jest.fn();
   const questionFindMany = jest.fn();
+  const gameResultCreate = jest.fn();
   const multiExec = jest.fn();
   const multiHset = jest.fn();
   const multiHdel = jest.fn();
@@ -60,7 +61,10 @@ describe('GameService', () => {
         },
         {
           provide: PrismaService,
-          useValue: { question: { findMany: questionFindMany } },
+          useValue: {
+            question: { findMany: questionFindMany },
+            gameResult: { create: gameResultCreate },
+          },
         },
       ],
     }).compile();
@@ -894,6 +898,118 @@ describe('GameService', () => {
       const payload = questionCalls[0][1];
       expect(payload).not.toHaveProperty('correctIndex');
       expect(payload).not.toHaveProperty('isTrap');
+    });
+
+    it('finishGame: full reveal, game_results insert, finished flip, 1h TTLs', async () => {
+      const playerJson = JSON.stringify({
+        nickname: 'Olia',
+        isHost: true,
+        connected: true,
+        resumeToken: 't',
+        joinedAt: 1,
+      });
+      const answerJson = JSON.stringify({
+        selectedOptionIndex: 1,
+        isSubmitted: true,
+        answerTime: 1,
+        elapsedMs: 1000,
+        score: 470,
+        isCorrect: true,
+        auto: false,
+      });
+      const normalQ = JSON.stringify({
+        index: 0,
+        baseQuestionId: 'q1',
+        text: 'Q1?',
+        options: ['a', 'b', 'c', 'd'],
+        correctIndex: 1,
+        isTrap: false,
+        explanation: 'бо так',
+      });
+      const trapQ = JSON.stringify({
+        index: 1,
+        baseQuestionId: 'q2',
+        text: 'Q2?',
+        options: ['a', 'b', 'c', 'd'],
+        correctIndex: null,
+        isTrap: true,
+        explanation: 'пояснення trap',
+      });
+      hgetall
+        .mockResolvedValueOnce({
+          ...waitingRoom,
+          status: 'in_game',
+          gameId: 'g1',
+          questionCount: '2',
+        })
+        .mockResolvedValueOnce({ 'p-1': playerJson })
+        // aggregateTotals: questions, answers:0, answers:1
+        .mockResolvedValueOnce({ '0': normalQ, '1': trapQ })
+        .mockResolvedValueOnce({ 'p-1': answerJson })
+        .mockResolvedValueOnce({ 'p-1': answerJson })
+        // review questions hash
+        .mockResolvedValueOnce({ '0': normalQ, '1': trapQ });
+      gameResultCreate.mockResolvedValue({});
+      const onGameOver = jest.fn();
+      service.onGameOver = onGameOver;
+
+      const payload = await service.finishGame('g1', 'r1');
+
+      expect(payload).not.toBeNull();
+      expect(payload!.trapQuestionIndex).toBe(1);
+      expect(payload!.review).toEqual([
+        {
+          index: 0,
+          text: 'Q1?',
+          options: ['a', 'b', 'c', 'd'],
+          correctIndex: 1,
+          isTrap: false,
+          explanation: 'бо так',
+        },
+        {
+          index: 1,
+          text: 'Q2?',
+          options: ['a', 'b', 'c', 'd'],
+          correctIndex: null,
+          isTrap: true,
+          explanation: 'пояснення trap',
+        },
+      ]);
+      expect(payload!.leaderboard).toEqual([
+        {
+          nickname: 'Olia',
+          totalScore: 940,
+          correctAnswers: 2,
+          avgResponseMs: 1000,
+        },
+      ]);
+      const createCalls = gameResultCreate.mock.calls as [
+        { data: Record<string, unknown> },
+      ][];
+      expect(createCalls[0][0].data).toMatchObject({
+        userId: 'host-1',
+        bankId: 'bank-a',
+        mode: 'multiplayer',
+        questionCount: 2,
+        leaderboard: payload!.leaderboard,
+      });
+      expect(multiHset).toHaveBeenCalledWith('room:r1', 'status', 'finished');
+      expect(multiExpire).toHaveBeenCalledWith('game:g1:state', 3600);
+      expect(multiExpire).toHaveBeenCalledWith('game:g1:questions', 3600);
+      expect(multiExpire).toHaveBeenCalledWith('game:g1:answers:0', 3600);
+      expect(multiExpire).toHaveBeenCalledWith('game:g1:answers:1', 3600);
+      expect(onGameOver).toHaveBeenCalledWith('r1', payload);
+    });
+
+    it('finishGame is idempotent: a finished room is a no-op', async () => {
+      hgetall.mockResolvedValueOnce({
+        ...waitingRoom,
+        status: 'finished',
+        gameId: 'g1',
+      });
+
+      expect(await service.finishGame('g1', 'r1')).toBeNull();
+      expect(gameResultCreate).not.toHaveBeenCalled();
     });
 
     it('advanceRound is a no-op while the round is still active', async () => {
