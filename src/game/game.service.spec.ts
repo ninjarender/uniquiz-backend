@@ -7,6 +7,8 @@ describe('GameService', () => {
   let service: GameService;
   const hgetall = jest.fn();
   const hget = jest.fn();
+  const hset = jest.fn();
+  const hlenMock = jest.fn();
   const questionFindMany = jest.fn();
   const multiExec = jest.fn();
   const multiHset = jest.fn();
@@ -44,7 +46,9 @@ describe('GameService', () => {
         GameService,
         {
           provide: RedisService,
-          useValue: { client: { hgetall, hget, multi: () => multi } },
+          useValue: {
+            client: { hgetall, hget, hset, hlen: hlenMock, multi: () => multi },
+          },
         },
         {
           provide: PrismaService,
@@ -445,6 +449,151 @@ describe('GameService', () => {
       expect(hsetCalls[0][1]).toBe('p-3');
       expect((JSON.parse(hsetCalls[0][2]) as { isHost: boolean }).isHost).toBe(
         true,
+      );
+    });
+  });
+
+  describe('submitAnswer', () => {
+    const session = { roomId: 'r1', playerId: 'p-1' };
+    const inGameRoom = { ...waitingRoom, status: 'in_game', gameId: 'g1' };
+    const activeState = (startedMsAgo: number) => ({
+      roomId: 'r1',
+      currentIndex: '1',
+      questionStartTime: String(Date.now() - startedMsAgo),
+      roundStatus: 'question_active',
+    });
+    const question = (isTrap: boolean) =>
+      JSON.stringify({
+        index: 1,
+        baseQuestionId: 'q2',
+        text: 'x',
+        options: ['a', 'b', 'c', 'd'],
+        correctIndex: isTrap ? null : 2,
+        isTrap,
+      });
+    const payload = { gameId: 'g1', questionIndex: 1, selectedOptionIndex: 2 };
+
+    it('not_a_member without a session', async () => {
+      await expect(service.submitAnswer({}, payload)).rejects.toMatchObject({
+        code: 'not_a_member',
+      });
+    });
+
+    it('invalid_payload for a gameId not matching the room', async () => {
+      hgetall.mockResolvedValueOnce(inGameRoom);
+
+      await expect(
+        service.submitAnswer(session, { ...payload, gameId: 'other' }),
+      ).rejects.toMatchObject({ code: 'invalid_payload' });
+    });
+
+    it('question_finished for a wrong index, closed round, or timeout', async () => {
+      hgetall
+        .mockResolvedValueOnce(inGameRoom)
+        .mockResolvedValueOnce({ ...activeState(1000), currentIndex: '0' })
+        .mockResolvedValueOnce(inGameRoom)
+        .mockResolvedValueOnce({
+          ...activeState(1000),
+          roundStatus: 'round_result',
+        })
+        .mockResolvedValueOnce(inGameRoom)
+        .mockResolvedValueOnce(activeState(11_000));
+
+      for (let i = 0; i < 3; i++) {
+        await expect(
+          service.submitAnswer(session, payload),
+        ).rejects.toMatchObject({ code: 'question_finished' });
+      }
+      expect(multiHset).not.toHaveBeenCalled();
+    });
+
+    it('first correct answer: stored with server elapsed and exact score', async () => {
+      hgetall
+        .mockResolvedValueOnce(inGameRoom)
+        .mockResolvedValueOnce(activeState(2000));
+      hget.mockResolvedValueOnce(null).mockResolvedValueOnce(question(false));
+      hlenMock.mockResolvedValueOnce(2).mockResolvedValueOnce(1);
+
+      const result = await service.submitAnswer(session, payload);
+
+      expect(result.ack).toEqual({ accepted: true, questionIndex: 1 });
+      expect(result.allSubmitted).toBe(false);
+      const hsetCalls = multiHset.mock.calls as string[][];
+      expect(hsetCalls[0][0]).toBe('game:g1:answers:1');
+      expect(hsetCalls[0][1]).toBe('p-1');
+      const stored = JSON.parse(hsetCalls[0][2]) as {
+        isCorrect: boolean;
+        score: number;
+        elapsedMs: number;
+        auto: boolean;
+        isSubmitted: boolean;
+      };
+      expect(stored.isSubmitted).toBe(true);
+      expect(stored.isCorrect).toBe(true);
+      expect(stored.auto).toBe(false);
+      expect(stored.elapsedMs).toBeGreaterThanOrEqual(2000);
+      expect(stored.elapsedMs).toBeLessThan(2500);
+      expect(stored.score).toBeCloseTo(500 - (30 * stored.elapsedMs) / 1000, 5);
+    });
+
+    it('wrong option and any trap choice score 0', async () => {
+      hgetall
+        .mockResolvedValueOnce(inGameRoom)
+        .mockResolvedValueOnce(activeState(1000))
+        .mockResolvedValueOnce(inGameRoom)
+        .mockResolvedValueOnce(activeState(1000));
+      hget
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(question(false))
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(question(true));
+      hlenMock.mockResolvedValue(5);
+
+      await service.submitAnswer(session, {
+        ...payload,
+        selectedOptionIndex: 0,
+      });
+      await service.submitAnswer(session, payload);
+
+      const hsetCalls = multiHset.mock.calls as string[][];
+      const wrong = JSON.parse(hsetCalls[0][2]) as {
+        score: number;
+        isCorrect: boolean;
+      };
+      const trap = JSON.parse(hsetCalls[1][2]) as {
+        score: number;
+        isCorrect: boolean;
+      };
+      expect(wrong).toMatchObject({ score: 0, isCorrect: false });
+      expect(trap).toMatchObject({ score: 0, isCorrect: false });
+    });
+
+    it('a repeated submission is ignored with accepted=false', async () => {
+      hgetall
+        .mockResolvedValueOnce(inGameRoom)
+        .mockResolvedValueOnce(activeState(1000));
+      hget.mockResolvedValueOnce(JSON.stringify({ isSubmitted: true }));
+
+      const result = await service.submitAnswer(session, payload);
+
+      expect(result.ack).toEqual({ accepted: false, questionIndex: 1 });
+      expect(multiHset).not.toHaveBeenCalled();
+    });
+
+    it('the last submission closes the round early', async () => {
+      hgetall
+        .mockResolvedValueOnce(inGameRoom)
+        .mockResolvedValueOnce(activeState(1000));
+      hget.mockResolvedValueOnce(null).mockResolvedValueOnce(question(false));
+      hlenMock.mockResolvedValueOnce(2).mockResolvedValueOnce(2);
+
+      const result = await service.submitAnswer(session, payload);
+
+      expect(result.allSubmitted).toBe(true);
+      expect(hset).toHaveBeenCalledWith(
+        'game:g1:state',
+        'roundStatus',
+        'round_result',
       );
     });
   });
