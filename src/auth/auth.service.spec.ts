@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
 import * as bcrypt from 'bcryptjs';
@@ -8,6 +8,7 @@ import { AuthService } from './auth.service';
 describe('AuthService', () => {
   let service: AuthService;
   const userCreate = jest.fn();
+  const userFindUnique = jest.fn();
   const signAsync = jest.fn();
 
   beforeEach(async () => {
@@ -15,7 +16,12 @@ describe('AuthService', () => {
     const moduleRef = await Test.createTestingModule({
       providers: [
         AuthService,
-        { provide: PrismaService, useValue: { user: { create: userCreate } } },
+        {
+          provide: PrismaService,
+          useValue: {
+            user: { create: userCreate, findUnique: userFindUnique },
+          },
+        },
         { provide: JwtService, useValue: { signAsync } },
       ],
     }).compile();
@@ -65,6 +71,66 @@ describe('AuthService', () => {
       userCreate.mockRejectedValue(dbDown);
 
       await expect(service.register(credentials)).rejects.toBe(dbDown);
+    });
+  });
+
+  describe('login', () => {
+    const password = 'password123';
+    const storedUser = {
+      id: 'user-id',
+      email: 'host@example.com',
+      passwordHash: bcrypt.hashSync(password, 10),
+    };
+
+    it('returns an access token for valid credentials (email lowercased)', async () => {
+      userFindUnique.mockResolvedValue(storedUser);
+      signAsync.mockResolvedValue('signed.jwt.token');
+
+      const result = await service.login({
+        email: 'Host@Example.com',
+        password,
+      });
+
+      expect(result).toEqual({ accessToken: 'signed.jwt.token' });
+      expect(userFindUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { email: 'host@example.com' } }),
+      );
+      expect(signAsync).toHaveBeenCalledWith({
+        sub: 'user-id',
+        email: 'host@example.com',
+      });
+    });
+
+    it('throws UnauthorizedException for a wrong password', async () => {
+      userFindUnique.mockResolvedValue(storedUser);
+
+      await expect(
+        service.login({ email: storedUser.email, password: 'wrong-password' }),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(signAsync).not.toHaveBeenCalled();
+    });
+
+    it('throws the same UnauthorizedException for an unknown email', async () => {
+      userFindUnique.mockResolvedValue(null);
+
+      const unknownEmail = service.login({
+        email: 'ghost@example.com',
+        password,
+      });
+      const wrongPassword = (async () => {
+        userFindUnique.mockResolvedValue(storedUser);
+        return service.login({
+          email: storedUser.email,
+          password: 'wrong-password',
+        });
+      })();
+
+      const [a, b] = await Promise.allSettled([unknownEmail, wrongPassword]);
+      expect(a.status).toBe('rejected');
+      expect(b.status).toBe('rejected');
+      const messageOf = (r: PromiseSettledResult<unknown>) =>
+        r.status === 'rejected' ? (r.reason as Error).message : '';
+      expect(messageOf(a)).toBe(messageOf(b)); // no user enumeration
     });
   });
 });

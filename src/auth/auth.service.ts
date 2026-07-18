@@ -1,10 +1,23 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthCredentialsDto } from './dto/auth-credentials.dto';
 
 const BCRYPT_ROUNDS = 10;
+
+/**
+ * Compared against when the email is unknown so that login timing does not
+ * reveal whether an account exists.
+ */
+const DUMMY_HASH = bcrypt.hashSync(
+  'invalid-password-placeholder',
+  BCRYPT_ROUNDS,
+);
 
 /** Prisma unique-constraint violation (duplicate email). */
 function isUniqueViolation(error: unknown): boolean {
@@ -42,6 +55,30 @@ export class AuthService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Verifies email + password and returns a signed JWT (AuthToken).
+   * 401 never says which of the two is wrong (contract: 401 on /auth/login).
+   */
+  async login(
+    credentials: AuthCredentialsDto,
+  ): Promise<{ accessToken: string }> {
+    const email = credentials.email.toLowerCase();
+    const user = await this.prisma.user.findUnique({
+      where: { email },
+      select: { id: true, email: true, passwordHash: true },
+    });
+
+    const passwordMatches = await bcrypt.compare(
+      credentials.password,
+      user?.passwordHash ?? DUMMY_HASH,
+    );
+    if (!user || !passwordMatches) {
+      throw new UnauthorizedException('Invalid email or password');
+    }
+
+    return this.issueToken(user);
   }
 
   private async issueToken(user: {

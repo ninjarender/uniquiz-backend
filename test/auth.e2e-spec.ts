@@ -6,15 +6,14 @@ import { AppModule } from '../src/app.module';
 import { setupApp } from '../src/app.setup';
 import { PrismaService } from '../src/prisma/prisma.service';
 
+type StoredUser = { id: string; email: string; passwordHash: string };
+
 /**
  * In-memory PrismaService stand-in: emulates the users table with its
  * unique-email constraint (rejects with code P2002, like PostgreSQL + Prisma).
  */
 class PrismaMock {
-  private readonly usersByEmail = new Map<
-    string,
-    { id: string; email: string }
-  >();
+  private readonly usersByEmail = new Map<string, StoredUser>();
 
   user = {
     create: ({ data }: { data: { email: string; passwordHash: string } }) => {
@@ -25,17 +24,20 @@ class PrismaMock {
           }),
         );
       }
-      const user = {
+      const user: StoredUser = {
         id: `user-${this.usersByEmail.size + 1}`,
         email: data.email,
+        passwordHash: data.passwordHash,
       };
       this.usersByEmail.set(data.email, user);
-      return Promise.resolve(user);
+      return Promise.resolve({ id: user.id, email: user.email });
     },
+    findUnique: ({ where }: { where: { email: string } }) =>
+      Promise.resolve(this.usersByEmail.get(where.email) ?? null),
   };
 }
 
-describe('POST /api/v1/auth/register (e2e)', () => {
+describe('Auth endpoints (e2e)', () => {
   let app: INestApplication<App>;
 
   beforeAll(async () => {
@@ -54,47 +56,122 @@ describe('POST /api/v1/auth/register (e2e)', () => {
     await app.close();
   });
 
-  it('201: registers a host and returns an AuthToken', async () => {
-    const response = await request(app.getHttpServer())
-      .post('/api/v1/auth/register')
-      .send({ email: 'host@example.com', password: 'password123' })
-      .expect(201);
+  describe('POST /api/v1/auth/register', () => {
+    it('201: registers a host and returns an AuthToken', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auth/register')
+        .send({ email: 'host@example.com', password: 'password123' })
+        .expect(201);
 
-    const body = response.body as { accessToken: string };
-    expect(typeof body.accessToken).toBe('string');
-    expect(body.accessToken.split('.')).toHaveLength(3); // JWT shape
-    expect(JSON.stringify(body)).not.toContain('passwordHash');
+      const body = response.body as { accessToken: string };
+      expect(typeof body.accessToken).toBe('string');
+      expect(body.accessToken.split('.')).toHaveLength(3); // JWT shape
+      expect(JSON.stringify(body)).not.toContain('passwordHash');
+    });
+
+    it('409: duplicate email matches the Error schema', async () => {
+      await request(app.getHttpServer())
+        .post('/api/v1/auth/register')
+        .send({ email: 'dup@example.com', password: 'password123' })
+        .expect(201);
+
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auth/register')
+        .send({ email: 'dup@example.com', password: 'another-password' })
+        .expect(409);
+
+      const body = response.body as { statusCode: number; message: string };
+      expect(body.statusCode).toBe(409);
+      expect(typeof body.message).toBe('string');
+    });
+
+    it.each([
+      ['invalid email', { email: 'not-an-email', password: 'password123' }],
+      [
+        'password shorter than 8',
+        { email: 'ok@example.com', password: 'short' },
+      ],
+      ['missing password', { email: 'ok@example.com' }],
+      ['empty body', {}],
+    ])('400: %s is rejected with a string message', async (_name, payload) => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auth/register')
+        .send(payload)
+        .expect(400);
+
+      const errorBody = response.body as {
+        statusCode: number;
+        message: string;
+      };
+      expect(errorBody.statusCode).toBe(400);
+      expect(typeof errorBody.message).toBe('string'); // Error.message: string
+    });
   });
 
-  it('409: duplicate email matches the Error schema', async () => {
-    await request(app.getHttpServer())
-      .post('/api/v1/auth/register')
-      .send({ email: 'dup@example.com', password: 'password123' })
-      .expect(201);
+  describe('POST /api/v1/auth/login', () => {
+    const credentials = { email: 'login@example.com', password: 'password123' };
 
-    const response = await request(app.getHttpServer())
-      .post('/api/v1/auth/register')
-      .send({ email: 'dup@example.com', password: 'another-password' })
-      .expect(409);
+    beforeAll(async () => {
+      await request(app.getHttpServer())
+        .post('/api/v1/auth/register')
+        .send(credentials)
+        .expect(201);
+    });
 
-    const body = response.body as { statusCode: number; message: string };
-    expect(body.statusCode).toBe(409);
-    expect(typeof body.message).toBe('string');
-  });
+    it('200: returns an AuthToken for valid credentials', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send(credentials)
+        .expect(200);
 
-  it.each([
-    ['invalid email', { email: 'not-an-email', password: 'password123' }],
-    ['password shorter than 8', { email: 'ok@example.com', password: 'short' }],
-    ['missing password', { email: 'ok@example.com' }],
-    ['empty body', {}],
-  ])('400: %s is rejected with a string message', async (_name, body) => {
-    const response = await request(app.getHttpServer())
-      .post('/api/v1/auth/register')
-      .send(body)
-      .expect(400);
+      const body = response.body as { accessToken: string };
+      expect(typeof body.accessToken).toBe('string');
+      expect(body.accessToken.split('.')).toHaveLength(3); // JWT shape
+    });
 
-    const errorBody = response.body as { statusCode: number; message: string };
-    expect(errorBody.statusCode).toBe(400);
-    expect(typeof errorBody.message).toBe('string'); // Error.message: string
+    it('200: email is matched case-insensitively', async () => {
+      await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ email: 'Login@Example.COM', password: credentials.password })
+        .expect(200);
+    });
+
+    it('401: wrong password and unknown email get the same message', async () => {
+      const wrongPassword = await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ email: credentials.email, password: 'wrong-password-1' })
+        .expect(401);
+
+      const unknownEmail = await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ email: 'ghost@example.com', password: credentials.password })
+        .expect(401);
+
+      const bodyA = wrongPassword.body as {
+        statusCode: number;
+        message: string;
+      };
+      const bodyB = unknownEmail.body as {
+        statusCode: number;
+        message: string;
+      };
+      expect(bodyA.statusCode).toBe(401);
+      expect(typeof bodyA.message).toBe('string');
+      expect(bodyA.message).toBe(bodyB.message); // no user enumeration
+    });
+
+    it('400: invalid body is rejected before hitting the database', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ email: 'not-an-email', password: 'password123' })
+        .expect(400);
+
+      const errorBody = response.body as {
+        statusCode: number;
+        message: string;
+      };
+      expect(errorBody.statusCode).toBe(400);
+      expect(typeof errorBody.message).toBe('string');
+    });
   });
 });
