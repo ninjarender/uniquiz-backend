@@ -1,7 +1,10 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -51,5 +54,15 @@ export class BanksController {
     @Body() body: BankNameDto,
   ): Promise<BankListItem> {
     return this.banksService.renameBank(payload.sub, bankId, body.name);
+  }
+
+  /** DELETE /banks/{bankId} → 204 (cascade) | 401 | 404. */
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Delete(':bankId')
+  remove(
+    @CurrentUser() payload: JwtPayload,
+    @Param('bankId', ParseUUIDPipe) bankId: string,
+  ): Promise<void> {
+    return this.banksService.deleteBank(payload.sub, bankId);
   }
 }

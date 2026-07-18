@@ -140,6 +140,26 @@ export class BanksService {
     return this.bankItem(userId, bankId);
   }
 
+  /**
+   * Deletes the host's own bank with its questions and answer sets.
+   * FKs are RESTRICT, so the cascade is an explicit transaction
+   * (answer sets -> questions -> bank). 404 for missing/foreign.
+   */
+  async deleteBank(userId: string, bankId: string): Promise<void> {
+    const [, , { count }] = await this.prisma.$transaction([
+      this.prisma.answerSet.deleteMany({
+        where: { question: { bankId, bank: { userId } } },
+      }),
+      this.prisma.question.deleteMany({
+        where: { bankId, bank: { userId } },
+      }),
+      this.prisma.bank.deleteMany({ where: { id: bankId, userId } }),
+    ]);
+    if (count === 0) {
+      throw new NotFoundException('Bank not found');
+    }
+  }
+
   /** Single Bank (list-item shape) with DB-computed counters. */
   private async bankItem(
     userId: string,
