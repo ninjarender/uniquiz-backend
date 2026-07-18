@@ -56,6 +56,28 @@ export class RoomsService {
   }
 
   /**
+   * GET /rooms/{roomId}: the only public player endpoint (no token) - the
+   * join page shows what the room is before the nickname prompt. 404 when
+   * the room never existed or its TTL ran out.
+   */
+  async getPublicInfo(roomId: string): Promise<RoomPublicInfo> {
+    const room = await this.redis.client.hgetall(`room:${roomId}`);
+    if (Object.keys(room).length === 0) {
+      throw new NotFoundException('Room not found');
+    }
+    return {
+      roomId,
+      status: room.status,
+      settings: {
+        mode: room.mode,
+        questionCount: Number(room.questionCount),
+        timePerQuestionSeconds: Number(room.timePerQuestionSeconds),
+      },
+      bankName: room.bankName,
+    };
+  }
+
+  /**
    * PATCH /rooms/{roomId}: host-only (foreign room = 404), waiting-only (409).
    * Updates the Redis room state and announces settings_updated to the lobby.
    */

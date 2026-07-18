@@ -138,6 +138,47 @@ describe('RoomsService', () => {
     expect(hsetnx).toHaveBeenCalledTimes(2);
   });
 
+  describe('getPublicInfo', () => {
+    it('404 for a missing or expired room', async () => {
+      hgetall.mockResolvedValueOnce({});
+
+      await expect(service.getPublicInfo('nope')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('returns RoomPublicInfo without any secrets, in any status', async () => {
+      hgetall.mockResolvedValueOnce({
+        status: 'in_game',
+        userId: 'host-1',
+        bankId: 'bank-a',
+        bankName: 'Біологія',
+        hostNickname: 'Vadym',
+        hostToken: 'secret',
+        mode: 'multiplayer',
+        questionCount: '5',
+        timePerQuestionSeconds: '10',
+        joinUrl: 'x',
+        gameId: 'g1',
+      });
+
+      const info = await service.getPublicInfo('r1');
+
+      expect(info).toEqual({
+        roomId: 'r1',
+        status: 'in_game',
+        settings: {
+          mode: 'multiplayer',
+          questionCount: 5,
+          timePerQuestionSeconds: 10,
+        },
+        bankName: 'Біологія',
+      });
+      expect(JSON.stringify(info)).not.toContain('secret');
+      expect(JSON.stringify(info)).not.toContain('host-1');
+    });
+  });
+
   describe('updateSettings', () => {
     const settings = {
       mode: GameMode.solo,
