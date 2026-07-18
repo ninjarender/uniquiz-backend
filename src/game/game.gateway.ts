@@ -193,6 +193,16 @@ export class GameGateway implements OnGatewayDisconnect {
     }
   }
 
+  /**
+   * sync_time (no payload) → sync_time_ack with the server clock (Unix ms) to
+   * the same socket. The client calls it when its local timer drifts ~500ms+
+   * from questionStartTime; scores always use server time regardless.
+   */
+  @SubscribeMessage('sync_time')
+  handleSyncTime(@ConnectedSocket() client: GameSocket): void {
+    client.emit('sync_time_ack', { serverTime: Date.now() });
+  }
+
   /** Validates a raw event payload into a DTO; invalid_payload on failure. */
   private async parse<T extends object>(
     dtoClass: new () => T,
