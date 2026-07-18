@@ -17,9 +17,18 @@ export interface PlayerView {
   connected: boolean;
 }
 
+/** Leaderboard row (common.yaml LeaderboardEntry); intermediate and final. */
+export interface LeaderboardEntry {
+  nickname: string;
+  totalScore: number;
+  correctAnswers: number;
+  avgResponseMs?: number;
+}
+
 /**
  * RoomState snapshot: lobby in waiting; in in_game also the current question
- * with the time left (leaderboard arrives with round results - task 0038).
+ * with the time left and the intermediate leaderboard; in finished - the
+ * final leaderboard.
  */
 export interface RoomState {
   roomId: string;
@@ -32,6 +41,7 @@ export interface RoomState {
   bankName: string;
   players: PlayerView[];
   currentQuestion?: ActiveQuestionPayload & { remainingSeconds: number };
+  leaderboard?: LeaderboardEntry[];
 }
 
 /** join_ack payload plus the broadcast-ready player entry. */
@@ -238,7 +248,7 @@ export class GameService {
       .exec();
 
     const state = this.toRoomState(payload.roomId, room, players);
-    if (room.status === 'in_game' && room.gameId) {
+    if (room.gameId && room.status === 'in_game') {
       const currentQuestion = await this.loadCurrentQuestion(
         room.gameId,
         Number(room.timePerQuestionSeconds),
@@ -247,7 +257,81 @@ export class GameService {
         state.currentQuestion = currentQuestion;
       }
     }
+    if (room.gameId && room.status !== 'waiting') {
+      // in_game - intermediate leaderboard, finished - final one.
+      state.leaderboard = await this.buildLeaderboard(room.gameId, players);
+    }
     return { room: state, player: this.toView(payload.playerId, stored) };
+  }
+
+  /**
+   * Leaderboard from the game's answer records (business-rules.md totals):
+   * totalScore is the rounded sum, correctAnswers includes the trap rule,
+   * avgResponseMs covers non-trap questions only. Round-close records for
+   * silent players (task 0038) slot in through the same aggregation. Also
+   * the building block for round_result/game_over (0038/0039).
+   */
+  private async buildLeaderboard(
+    gameId: string,
+    players: Record<string, StoredPlayer>,
+  ): Promise<LeaderboardEntry[]> {
+    const questionsRaw = await this.redis.client.hgetall(
+      `game:${gameId}:questions`,
+    );
+    const trapByIndex = new Map(
+      Object.entries(questionsRaw).map(([index, json]) => [
+        index,
+        (JSON.parse(json) as GameQuestionSnapshot).isTrap,
+      ]),
+    );
+    const answersByIndex = await Promise.all(
+      [...trapByIndex.keys()].map(async (index) => ({
+        index,
+        answers: await this.redis.client.hgetall(
+          `game:${gameId}:answers:${index}`,
+        ),
+      })),
+    );
+
+    const totals = new Map<
+      string,
+      { totalScore: number; correctAnswers: number; responseTimes: number[] }
+    >();
+    for (const playerId of Object.keys(players)) {
+      totals.set(playerId, {
+        totalScore: 0,
+        correctAnswers: 0,
+        responseTimes: [],
+      });
+    }
+    for (const { index, answers } of answersByIndex) {
+      for (const [playerId, json] of Object.entries(answers)) {
+        const answer = JSON.parse(json) as StoredAnswer;
+        const total = totals.get(playerId);
+        if (!total) {
+          continue;
+        }
+        total.totalScore += answer.score;
+        total.correctAnswers += answer.isCorrect ? 1 : 0;
+        if (!trapByIndex.get(index)) {
+          total.responseTimes.push(answer.elapsedMs);
+        }
+      }
+    }
+
+    return [...totals.entries()]
+      .map(([playerId, total]) => ({
+        nickname: players[playerId].nickname,
+        totalScore: Math.round(total.totalScore),
+        correctAnswers: total.correctAnswers,
+        ...(total.responseTimes.length > 0 && {
+          avgResponseMs: Math.round(
+            total.responseTimes.reduce((sum, ms) => sum + ms, 0) /
+              total.responseTimes.length,
+          ),
+        }),
+      }))
+      .sort((a, b) => b.totalScore - a.totalScore);
   }
 
   /**
