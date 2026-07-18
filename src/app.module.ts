@@ -8,6 +8,7 @@ import { QuestionsModule } from './questions/questions.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { RoomsModule } from './rooms/rooms.module';
+import { GameModule } from './game/game.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { RoomsModule } from './rooms/rooms.module';
     BanksModule,
     QuestionsModule,
     RoomsModule,
+    GameModule,
   ],
   controllers: [AppController],
   providers: [AppService],

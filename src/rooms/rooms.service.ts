@@ -10,10 +10,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { RoomCreateDto } from './dto/room-create.dto';
 
-/** RoomCreated response: id plus the link the host shares with players. */
+/** RoomCreated response: id, the link the host shares, and the host's secret. */
 export interface RoomCreated {
   roomId: string;
   joinUrl: string;
+  hostToken: string;
 }
 
 /** Answer-set statuses that make a question playable (accepted/edited). */
@@ -48,7 +49,7 @@ export class RoomsService {
   async createRoom(userId: string, body: RoomCreateDto): Promise<RoomCreated> {
     const bank = await this.prisma.bank.findFirst({
       where: { id: body.bankId, userId },
-      select: { id: true },
+      select: { id: true, name: true },
     });
     if (!bank) {
       throw new NotFoundException('Bank not found');
@@ -68,13 +69,18 @@ export class RoomsService {
 
     const roomId = await this.reserveRoomId();
     const joinUrl = `${this.joinBaseUrl}/join/${roomId}`;
+    // hostToken never reaches anyone but the creator; its bearer gets
+    // isHost=true on join_room (asyncapi JoinRoomPayload.hostToken).
+    const hostToken = randomBytes(24).toString('base64url');
     await this.redis.client
       .multi()
       .hset(`room:${roomId}`, {
         status: 'waiting',
         userId,
         bankId: body.bankId,
+        bankName: bank.name,
         hostNickname: body.hostNickname,
+        hostToken,
         mode: body.settings.mode,
         questionCount: body.settings.questionCount,
         timePerQuestionSeconds: body.settings.timePerQuestionSeconds,
@@ -83,7 +89,7 @@ export class RoomsService {
       .expire(`room:${roomId}`, ROOM_TTL_SECONDS)
       .exec();
 
-    return { roomId, joinUrl };
+    return { roomId, joinUrl, hostToken };
   }
 
   /**
