@@ -297,6 +297,29 @@ describe('GameGateway', () => {
     expect(serverEmit).toHaveBeenCalledWith('settings_updated', { settings });
   });
 
+  it('room_closing_soon goes out to the lobby', () => {
+    serviceMock.onRoomClosingSoon!('r1', { closesInSeconds: 300 });
+
+    expect(serverEmit).toHaveBeenCalledWith('room_closing_soon', {
+      closesInSeconds: 300,
+    });
+  });
+
+  it('room_closed goes out and the sockets are evicted from the room', () => {
+    const socketsLeave = jest.fn();
+    gateway.server = {
+      to: jest.fn(() => ({ emit: serverEmit })),
+      in: jest.fn(() => ({ socketsLeave })),
+    } as never;
+
+    serviceMock.onRoomClosed!('r1', { reason: 'lobby_timeout' });
+
+    expect(serverEmit).toHaveBeenCalledWith('room_closed', {
+      reason: 'lobby_timeout',
+    });
+    expect(socketsLeave).toHaveBeenCalledWith('r1');
+  });
+
   it('game_over goes out to the whole room with the full reveal', () => {
     const payload = { gameId: 'g1', trapQuestionIndex: 1 };
 

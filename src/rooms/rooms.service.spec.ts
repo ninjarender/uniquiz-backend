@@ -14,6 +14,7 @@ describe('RoomsService', () => {
   const hsetnx = jest.fn();
   const hgetall = jest.fn();
   const notifySettingsUpdated = jest.fn();
+  const armLobbyTimeout = jest.fn();
   const expire = jest.fn();
   const multiExec = jest.fn();
   const multiHset = jest.fn();
@@ -56,7 +57,10 @@ describe('RoomsService', () => {
           provide: RedisService,
           useValue: { client: { hsetnx, hgetall, expire, multi: () => multi } },
         },
-        { provide: GameService, useValue: { notifySettingsUpdated } },
+        {
+          provide: GameService,
+          useValue: { notifySettingsUpdated, armLobbyTimeout },
+        },
         {
           provide: ConfigService,
           useValue: {
@@ -121,6 +125,7 @@ describe('RoomsService', () => {
       24 * 60 * 60,
     );
     expect(multiExec).toHaveBeenCalled();
+    expect(armLobbyTimeout).toHaveBeenCalledWith(result.roomId);
   });
 
   it('retries the room id when the key already exists', async () => {

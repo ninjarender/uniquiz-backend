@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
@@ -12,9 +13,15 @@ describe('GameService', () => {
   const hlenMock = jest.fn();
   const questionFindMany = jest.fn();
   const gameResultCreate = jest.fn();
+  const zrangebyscore = jest.fn();
+  const zscore = jest.fn();
+  const zrem = jest.fn();
+  const del = jest.fn();
   const multiExec = jest.fn();
   const multiHset = jest.fn();
   const multiHdel = jest.fn();
+  const multiZadd = jest.fn();
+  const multiZrem = jest.fn();
   const multiExpire = jest.fn();
 
   const waitingRoom = {
@@ -35,11 +42,15 @@ describe('GameService', () => {
     const multi = {
       hset: multiHset,
       hdel: multiHdel,
+      zadd: multiZadd,
+      zrem: multiZrem,
       expire: multiExpire,
       exec: multiExec,
     };
     multiHset.mockReturnValue(multi);
     multiHdel.mockReturnValue(multi);
+    multiZadd.mockReturnValue(multi);
+    multiZrem.mockReturnValue(multi);
     multiExpire.mockReturnValue(multi);
     multiExec.mockResolvedValue([]);
 
@@ -55,6 +66,10 @@ describe('GameService', () => {
               hmget,
               hset,
               hlen: hlenMock,
+              zrangebyscore,
+              zscore,
+              zrem,
+              del,
               multi: () => multi,
             },
           },
@@ -65,6 +80,10 @@ describe('GameService', () => {
             question: { findMany: questionFindMany },
             gameResult: { create: gameResultCreate },
           },
+        },
+        {
+          provide: ConfigService,
+          useValue: { get: (_key: string, fallback: number) => fallback },
         },
       ],
     }).compile();
@@ -1028,6 +1047,75 @@ describe('GameService', () => {
     });
   });
 
+  describe('lobby timeout', () => {
+    it('armLobbyTimeout registers warning and deadline marks in Redis', async () => {
+      const before = Date.now();
+
+      await service.armLobbyTimeout('r1');
+
+      const after = Date.now();
+      const zaddCalls = multiZadd.mock.calls as [string, number, string][];
+      expect(zaddCalls).toHaveLength(2);
+      const [warnCall, deadlineCall] = zaddCalls;
+      expect(warnCall[0]).toBe('lobby:warnings');
+      expect(warnCall[2]).toBe('r1');
+      expect(deadlineCall[0]).toBe('lobby:deadlines');
+      expect(deadlineCall[2]).toBe('r1');
+      expect(deadlineCall[1] - warnCall[1]).toBe(5 * 60 * 1000);
+      expect(deadlineCall[1]).toBeGreaterThanOrEqual(before + 30 * 60 * 1000);
+      expect(deadlineCall[1]).toBeLessThanOrEqual(after + 30 * 60 * 1000);
+    });
+
+    it('sweep fires room_closing_soon on the warning threshold', async () => {
+      const now = 1_000_000;
+      zrangebyscore
+        .mockResolvedValueOnce(['r1']) // due warnings
+        .mockResolvedValueOnce([]); // due closures
+      hget.mockResolvedValueOnce('waiting');
+      zscore.mockResolvedValueOnce(String(now + 300_000));
+      const onRoomClosingSoon = jest.fn();
+      service.onRoomClosingSoon = onRoomClosingSoon;
+
+      await service.sweepLobbies(now);
+
+      expect(zrem).toHaveBeenCalledWith('lobby:warnings', 'r1');
+      expect(onRoomClosingSoon).toHaveBeenCalledWith('r1', {
+        closesInSeconds: 300,
+      });
+      expect(del).not.toHaveBeenCalled();
+    });
+
+    it('sweep closes an expired lobby: room deleted, room_closed fired', async () => {
+      zrangebyscore
+        .mockResolvedValueOnce([]) // warnings
+        .mockResolvedValueOnce(['r1']); // closures
+      hget.mockResolvedValueOnce('waiting');
+      const onRoomClosed = jest.fn();
+      service.onRoomClosed = onRoomClosed;
+
+      await service.sweepLobbies(1_000_000);
+
+      expect(multiZrem).toHaveBeenCalledWith('lobby:deadlines', 'r1');
+      expect(multiZrem).toHaveBeenCalledWith('lobby:warnings', 'r1');
+      expect(del).toHaveBeenCalledWith('room:r1', 'room:r1:players');
+      expect(onRoomClosed).toHaveBeenCalledWith('r1', {
+        reason: 'lobby_timeout',
+      });
+    });
+
+    it('sweep only unregisters rooms that left the waiting state', async () => {
+      zrangebyscore.mockResolvedValueOnce([]).mockResolvedValueOnce(['r1']);
+      hget.mockResolvedValueOnce('in_game');
+      const onRoomClosed = jest.fn();
+      service.onRoomClosed = onRoomClosed;
+
+      await service.sweepLobbies(1_000_000);
+
+      expect(del).not.toHaveBeenCalled();
+      expect(onRoomClosed).not.toHaveBeenCalled();
+    });
+  });
+
   describe('startGame', () => {
     const storedPlayer = (nickname: string, isHost: boolean) =>
       JSON.stringify({ nickname, isHost, connected: true, resumeToken: 't' });
@@ -1160,6 +1248,8 @@ describe('GameService', () => {
         status: 'in_game',
         gameId: gameStarted.gameId,
       });
+      expect(multiZrem).toHaveBeenCalledWith('lobby:deadlines', 'r1');
+      expect(multiZrem).toHaveBeenCalledWith('lobby:warnings', 'r1');
       expect(multiHset).toHaveBeenCalledWith(
         `game:${gameStarted.gameId}:state`,
         expect.objectContaining({ roomId: 'r1', currentIndex: 0 }),

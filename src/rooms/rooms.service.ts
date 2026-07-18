@@ -147,6 +147,7 @@ export class RoomsService {
       .expire(`room:${roomId}`, ROOM_TTL_SECONDS)
       .exec();
 
+    await this.gameService.armLobbyTimeout(roomId);
     return { roomId, joinUrl, hostToken };
   }
 

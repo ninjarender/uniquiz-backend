@@ -1,4 +1,5 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { randomBytes, randomInt, randomUUID } from 'crypto';
 import { ChainableCommander } from 'ioredis';
 import { Prisma } from '../../generated/prisma/client';
@@ -217,10 +218,26 @@ const ROUND_RESULT_PAUSE_MS = 5000;
 /** Game snapshot lives ~1h after the game_results insert (data-model.md). */
 const GAME_REVIEW_TTL_SECONDS = 60 * 60;
 
+/**
+ * Lobby-timeout bookkeeping (tasks 0034/0035): zsets with ms-timestamp scores.
+ * Deadline marks live in Redis - unlike round timers, lobby closure survives
+ * an instance restart; a periodic sweep fires what is due.
+ */
+const LOBBY_WARNINGS_KEY = 'lobby:warnings';
+const LOBBY_DEADLINES_KEY = 'lobby:deadlines';
+
+/** How often the sweep checks for due lobby warnings/closures. */
+const LOBBY_SWEEP_INTERVAL_MS = 15_000;
+
 @Injectable()
-export class GameService implements OnModuleDestroy {
+export class GameService implements OnModuleInit, OnModuleDestroy {
   /** In-process round timers per gameId (single-instance MVP). */
   private readonly roundTimers = new Map<string, NodeJS.Timeout>();
+
+  /** Lobby wait limit and how early the warning goes out (env-tunable, TBD). */
+  private readonly lobbyTimeoutMs: number;
+  private readonly lobbyWarningMs: number;
+  private lobbySweep?: NodeJS.Timeout;
 
   /** Set by the gateway: personal round_result delivery to each player. */
   onRoundResult?: (data: RoundResultData) => void;
@@ -234,6 +251,15 @@ export class GameService implements OnModuleDestroy {
   /** Set by the gateway: settings_updated broadcast to the lobby. */
   onSettingsUpdated?: (roomId: string, settings: RoomState['settings']) => void;
 
+  /** Set by the gateway: room_closing_soon broadcast to the lobby. */
+  onRoomClosingSoon?: (
+    roomId: string,
+    payload: { closesInSeconds: number },
+  ) => void;
+
+  /** Set by the gateway: room_closed broadcast + socket eviction. */
+  onRoomClosed?: (roomId: string, payload: { reason: 'lobby_timeout' }) => void;
+
   /**
    * Bridge for the REST layer (PATCH /rooms/{roomId}, task 0020): a successful
    * settings update is announced to the lobby as settings_updated.
@@ -245,13 +271,87 @@ export class GameService implements OnModuleDestroy {
   constructor(
     private readonly redis: RedisService,
     private readonly prisma: PrismaService,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.lobbyTimeoutMs =
+      config.get<number>('LOBBY_TIMEOUT_MINUTES', 30) * 60 * 1000;
+    this.lobbyWarningMs =
+      config.get<number>('LOBBY_WARNING_MINUTES', 5) * 60 * 1000;
+  }
+
+  onModuleInit(): void {
+    this.lobbySweep = setInterval(() => {
+      void this.sweepLobbies().catch(() => undefined);
+    }, LOBBY_SWEEP_INTERVAL_MS);
+  }
 
   onModuleDestroy(): void {
     for (const timer of this.roundTimers.values()) {
       clearTimeout(timer);
     }
     this.roundTimers.clear();
+    if (this.lobbySweep) {
+      clearInterval(this.lobbySweep);
+    }
+  }
+
+  /**
+   * Arms the lobby timeout for a fresh room (called by POST /rooms): the
+   * warning fires lobbyWarningMs before the deadline, the closure - at it.
+   */
+  async armLobbyTimeout(roomId: string): Promise<void> {
+    const deadline = Date.now() + this.lobbyTimeoutMs;
+    await this.redis.client
+      .multi()
+      .zadd(LOBBY_WARNINGS_KEY, deadline - this.lobbyWarningMs, roomId)
+      .zadd(LOBBY_DEADLINES_KEY, deadline, roomId)
+      .exec();
+  }
+
+  /**
+   * Fires due lobby warnings and closures; runs on an interval and is safe to
+   * call ad hoc. Rooms that left the waiting state are only unregistered.
+   */
+  async sweepLobbies(now = Date.now()): Promise<void> {
+    const dueWarnings = await this.redis.client.zrangebyscore(
+      LOBBY_WARNINGS_KEY,
+      '-inf',
+      now,
+    );
+    for (const roomId of dueWarnings) {
+      await this.redis.client.zrem(LOBBY_WARNINGS_KEY, roomId);
+      const [status, deadlineRaw] = await Promise.all([
+        this.redis.client.hget(`room:${roomId}`, 'status'),
+        this.redis.client.zscore(LOBBY_DEADLINES_KEY, roomId),
+      ]);
+      if (status === 'waiting' && deadlineRaw) {
+        this.onRoomClosingSoon?.(roomId, {
+          closesInSeconds: Math.max(
+            0,
+            Math.round((Number(deadlineRaw) - now) / 1000),
+          ),
+        });
+      }
+    }
+
+    const dueClosures = await this.redis.client.zrangebyscore(
+      LOBBY_DEADLINES_KEY,
+      '-inf',
+      now,
+    );
+    for (const roomId of dueClosures) {
+      await this.redis.client
+        .multi()
+        .zrem(LOBBY_DEADLINES_KEY, roomId)
+        .zrem(LOBBY_WARNINGS_KEY, roomId)
+        .exec();
+      const status = await this.redis.client.hget(`room:${roomId}`, 'status');
+      if (status !== 'waiting') {
+        continue;
+      }
+      await this.redis.client.del(`room:${roomId}`, `room:${roomId}:players`);
+      this.onRoomClosed?.(roomId, { reason: 'lobby_timeout' });
+    }
   }
 
   /**
@@ -1019,6 +1119,9 @@ export class GameService implements OnModuleDestroy {
     const multi = this.redis.client
       .multi()
       .hset(roomKey, { status: 'in_game', gameId })
+      // the lobby timeout no longer applies once the game starts
+      .zrem(LOBBY_DEADLINES_KEY, roomId)
+      .zrem(LOBBY_WARNINGS_KEY, roomId)
       .hset(`game:${gameId}:state`, {
         roomId,
         currentIndex: 0,
