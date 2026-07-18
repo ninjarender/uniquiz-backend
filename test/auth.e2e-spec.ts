@@ -1,4 +1,5 @@
 import { INestApplication } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { App } from 'supertest/types';
@@ -32,8 +33,25 @@ class PrismaMock {
       this.usersByEmail.set(data.email, user);
       return Promise.resolve({ id: user.id, email: user.email });
     },
-    findUnique: ({ where }: { where: { email: string } }) =>
-      Promise.resolve(this.usersByEmail.get(where.email) ?? null),
+    findUnique: ({
+      where,
+      select,
+    }: {
+      where: { email?: string; id?: string };
+      select?: Partial<Record<keyof StoredUser, boolean>>;
+    }) => {
+      const user =
+        where.email !== undefined
+          ? this.usersByEmail.get(where.email)
+          : [...this.usersByEmail.values()].find((u) => u.id === where.id);
+      if (!user) return Promise.resolve(null);
+      if (!select) return Promise.resolve({ ...user });
+      const projected: Partial<StoredUser> = {};
+      for (const key of Object.keys(select) as (keyof StoredUser)[]) {
+        if (select[key]) projected[key] = user[key];
+      }
+      return Promise.resolve(projected);
+    },
   };
 }
 
@@ -105,6 +123,80 @@ describe('Auth endpoints (e2e)', () => {
       };
       expect(errorBody.statusCode).toBe(400);
       expect(typeof errorBody.message).toBe('string'); // Error.message: string
+    });
+  });
+
+  describe('GET /api/v1/auth/me', () => {
+    const credentials = { email: 'me@example.com', password: 'password123' };
+    let accessToken: string;
+
+    beforeAll(async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auth/register')
+        .send(credentials)
+        .expect(201);
+      accessToken = (response.body as { accessToken: string }).accessToken;
+    });
+
+    it('200: returns the account (User schema) for a valid token', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/auth/me')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(200);
+
+      const body = response.body as { id: string; email: string };
+      expect(typeof body.id).toBe('string');
+      expect(body.email).toBe(credentials.email);
+      expect(JSON.stringify(body)).not.toContain('passwordHash');
+    });
+
+    it('401: missing Authorization header', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/auth/me')
+        .expect(401);
+
+      const body = response.body as { statusCode: number; message: string };
+      expect(body.statusCode).toBe(401);
+      expect(typeof body.message).toBe('string');
+    });
+
+    it('401: non-Bearer scheme is rejected', async () => {
+      await request(app.getHttpServer())
+        .get('/api/v1/auth/me')
+        .set('Authorization', `Basic ${accessToken}`)
+        .expect(401);
+    });
+
+    it('401: tampered token is rejected', async () => {
+      await request(app.getHttpServer())
+        .get('/api/v1/auth/me')
+        .set('Authorization', `Bearer ${accessToken}x`)
+        .expect(401);
+    });
+
+    it('401: expired token is rejected', async () => {
+      const expired = await new JwtService({
+        secret: process.env.JWT_SECRET,
+      }).signAsync(
+        { sub: 'user-1', email: credentials.email },
+        { expiresIn: '-1s' },
+      );
+
+      await request(app.getHttpServer())
+        .get('/api/v1/auth/me')
+        .set('Authorization', `Bearer ${expired}`)
+        .expect(401);
+    });
+
+    it('401: valid token of a deleted account is rejected', async () => {
+      const ghost = await new JwtService({
+        secret: process.env.JWT_SECRET,
+      }).signAsync({ sub: 'no-such-user', email: 'ghost@example.com' });
+
+      await request(app.getHttpServer())
+        .get('/api/v1/auth/me')
+        .set('Authorization', `Bearer ${ghost}`)
+        .expect(401);
     });
   });
 
