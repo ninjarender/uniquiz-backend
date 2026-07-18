@@ -35,23 +35,20 @@ describe('GameGateway', () => {
     player: { id: 'p-1', nickname: 'Olia', isHost: false, connected: true },
   };
 
+  let serviceMock: GameService;
+
   beforeEach(async () => {
     jest.clearAllMocks();
+    serviceMock = {
+      joinRoom,
+      rejoinRoom,
+      leaveRoom,
+      startGame,
+      submitAnswer,
+      handleDisconnect,
+    } as unknown as GameService;
     const moduleRef = await Test.createTestingModule({
-      providers: [
-        GameGateway,
-        {
-          provide: GameService,
-          useValue: {
-            joinRoom,
-            rejoinRoom,
-            leaveRoom,
-            startGame,
-            submitAnswer,
-            handleDisconnect,
-          },
-        },
-      ],
+      providers: [GameGateway, { provide: GameService, useValue: serviceMock }],
     }).compile();
     gateway = moduleRef.get(GameGateway);
     gateway.server = { to: jest.fn(() => ({ emit: serverEmit })) } as never;
@@ -224,6 +221,68 @@ describe('GameGateway', () => {
       'error',
       expect.objectContaining({ code: 'invalid_payload' }),
     );
+  });
+
+  it('round_result is delivered personally; spectators without a player get nothing', async () => {
+    const mkSocket = (playerId?: string) => ({
+      data: { roomId: 'r1', playerId },
+      emit: jest.fn(),
+    });
+    const s1 = mkSocket('p-1');
+    const s2 = mkSocket('p-2');
+    const s3 = mkSocket();
+    gateway.server = {
+      in: jest.fn(() => ({
+        fetchSockets: () => Promise.resolve([s1, s2, s3]),
+      })),
+      to: jest.fn(() => ({ emit: serverEmit })),
+    } as never;
+    const data = {
+      roomId: 'r1',
+      gameId: 'g1',
+      questionIndex: 0,
+      isLast: false,
+      leaderboard: [{ nickname: 'Olia', totalScore: 470, correctAnswers: 1 }],
+      perPlayer: {
+        'p-1': {
+          selectedOptionIndex: 2,
+          isCorrect: true,
+          score: 470,
+          elapsedMs: 1000,
+          totalScore: 470,
+        },
+        'p-2': {
+          selectedOptionIndex: null,
+          isCorrect: false,
+          score: 0,
+          elapsedMs: null,
+          totalScore: 0,
+        },
+      },
+    };
+
+    serviceMock.onRoundResult!(data);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(s1.emit).toHaveBeenCalledWith('round_result', {
+      questionIndex: 0,
+      yourResult: data.perPlayer['p-1'],
+      leaderboard: data.leaderboard,
+      isLast: false,
+    });
+    expect(s2.emit).toHaveBeenCalledWith(
+      'round_result',
+      expect.objectContaining({ yourResult: data.perPlayer['p-2'] }),
+    );
+    expect(s3.emit).not.toHaveBeenCalled();
+  });
+
+  it('the next round goes out as question_started to the whole room', () => {
+    const question = { gameId: 'g1', index: 1 };
+
+    serviceMock.onQuestionStarted!('r1', question as never);
+
+    expect(serverEmit).toHaveBeenCalledWith('question_started', question);
   });
 
   it('disconnect of the host → host_changed to the room', async () => {

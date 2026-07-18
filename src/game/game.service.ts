@@ -129,6 +129,37 @@ export interface RoundClosedInfo {
 }
 
 /**
+ * Personal slice of round_result (asyncapi PersonalRoundResult). The correct
+ * option is deliberately absent - any reveal would expose the trap round.
+ */
+export interface PersonalRoundResult {
+  selectedOptionIndex: number | null;
+  isCorrect: boolean;
+  score: number;
+  /** null - "no answer" for the whole round. */
+  elapsedMs: number | null;
+  totalScore: number;
+}
+
+/** Everything the gateway needs to deliver round_result personally. */
+export interface RoundResultData {
+  roomId: string;
+  gameId: string;
+  questionIndex: number;
+  /** true - game_over follows instead of the next question. */
+  isLast: boolean;
+  leaderboard: LeaderboardEntry[];
+  perPlayer: Record<string, PersonalRoundResult>;
+}
+
+/** Running totals of one player across the game's rounds. */
+interface PlayerTotals {
+  totalScore: number;
+  correctAnswers: number;
+  responseTimes: number[];
+}
+
+/**
  * Server-side question snapshot in game:{gameId}:questions (data-model.md).
  * correctIndex/isTrap never leave the server during the game.
  */
@@ -158,13 +189,22 @@ const ROOM_TTL_SECONDS = 24 * 60 * 60;
  */
 const ROUND_GRACE_MS = 1500;
 
+/** Leaderboard pause between round_result and the next question (value TBD). */
+const ROUND_RESULT_PAUSE_MS = 5000;
+
 @Injectable()
 export class GameService implements OnModuleDestroy {
   /** In-process round timers per gameId (single-instance MVP). */
   private readonly roundTimers = new Map<string, NodeJS.Timeout>();
 
-  /** Set by the round_result flow (task 0038) to broadcast closures. */
-  onRoundClosed?: (info: RoundClosedInfo) => void;
+  /** Set by the gateway: personal round_result delivery to each player. */
+  onRoundResult?: (data: RoundResultData) => void;
+
+  /** Set by the gateway: question_started broadcast for the next round. */
+  onQuestionStarted?: (roomId: string, question: ActiveQuestionPayload) => void;
+
+  /** Set by the game_over flow (task 0039); fires after the last round's pause. */
+  onGameOver?: (info: { gameId: string; roomId: string }) => void;
 
   constructor(
     private readonly redis: RedisService,
@@ -303,6 +343,17 @@ export class GameService implements OnModuleDestroy {
     gameId: string,
     players: Record<string, StoredPlayer>,
   ): Promise<LeaderboardEntry[]> {
+    return this.leaderboardFromTotals(
+      players,
+      await this.aggregateTotals(gameId, players),
+    );
+  }
+
+  /** Per-player running totals across all answered rounds of the game. */
+  private async aggregateTotals(
+    gameId: string,
+    players: Record<string, StoredPlayer>,
+  ): Promise<Map<string, PlayerTotals>> {
     const questionsRaw = await this.redis.client.hgetall(
       `game:${gameId}:questions`,
     );
@@ -321,10 +372,7 @@ export class GameService implements OnModuleDestroy {
       })),
     );
 
-    const totals = new Map<
-      string,
-      { totalScore: number; correctAnswers: number; responseTimes: number[] }
-    >();
+    const totals = new Map<string, PlayerTotals>();
     for (const playerId of Object.keys(players)) {
       totals.set(playerId, {
         totalScore: 0,
@@ -346,7 +394,13 @@ export class GameService implements OnModuleDestroy {
         }
       }
     }
+    return totals;
+  }
 
+  private leaderboardFromTotals(
+    players: Record<string, StoredPlayer>,
+    totals: Map<string, PlayerTotals>,
+  ): LeaderboardEntry[] {
     return [...totals.entries()]
       .map(([playerId, total]) => ({
         nickname: players[playerId].nickname,
@@ -599,7 +653,9 @@ export class GameService implements OnModuleDestroy {
   /**
    * Closes the current round: idempotent flip to round_result, cancels the
    * timer, records "no answer" for silent players (normal - 0, trap - 500
-   * and correct, per business-rules.md) and notifies the round_result flow.
+   * and correct, per business-rules.md), hands the personal results and the
+   * leaderboard to the gateway, and schedules the next step after the pause
+   * (next question, or game_over - task 0039).
    */
   async closeRound(
     gameId: string,
@@ -615,13 +671,16 @@ export class GameService implements OnModuleDestroy {
 
     const questionIndex = Number(state.currentIndex);
     const answersKey = `game:${gameId}:answers:${questionIndex}`;
-    const [players, answered, rawQuestion, timePerQuestionSeconds] =
-      await Promise.all([
-        this.loadPlayers(`room:${roomId}:players`),
-        this.redis.client.hgetall(answersKey),
-        this.redis.client.hget(`game:${gameId}:questions`, state.currentIndex),
-        this.redis.client.hget(`room:${roomId}`, 'timePerQuestionSeconds'),
-      ]);
+    const [players, answered, rawQuestion, roomFields] = await Promise.all([
+      this.loadPlayers(`room:${roomId}:players`),
+      this.redis.client.hgetall(answersKey),
+      this.redis.client.hget(`game:${gameId}:questions`, state.currentIndex),
+      this.redis.client.hmget(
+        `room:${roomId}`,
+        'timePerQuestionSeconds',
+        'questionCount',
+      ),
+    ]);
     const isTrap = rawQuestion
       ? (JSON.parse(rawQuestion) as GameQuestionSnapshot).isTrap
       : false;
@@ -629,7 +688,7 @@ export class GameService implements OnModuleDestroy {
       selectedOptionIndex: null,
       isSubmitted: false,
       answerTime: Date.now(),
-      elapsedMs: Number(timePerQuestionSeconds) * 1000,
+      elapsedMs: Number(roomFields[0]) * 1000,
       score: isTrap ? 500 : 0,
       isCorrect: isTrap,
       auto: false,
@@ -641,14 +700,105 @@ export class GameService implements OnModuleDestroy {
       const multi = this.redis.client.multi();
       for (const playerId of missing) {
         multi.hset(answersKey, playerId, JSON.stringify(silent));
+        answered[playerId] = JSON.stringify(silent);
       }
       multi.expire(answersKey, ROOM_TTL_SECONDS);
       await multi.exec();
     }
 
-    const info: RoundClosedInfo = { gameId, roomId, questionIndex };
-    this.onRoundClosed?.(info);
-    return info;
+    // Totals are aggregated after the silent records land, so the round's
+    // leaderboard already reflects everyone.
+    const totals = await this.aggregateTotals(gameId, players);
+    const perPlayer: Record<string, PersonalRoundResult> = {};
+    for (const playerId of Object.keys(players)) {
+      const raw = answered[playerId];
+      if (!raw) {
+        continue;
+      }
+      const answer = JSON.parse(raw) as StoredAnswer;
+      perPlayer[playerId] = {
+        selectedOptionIndex: answer.selectedOptionIndex,
+        isCorrect: answer.isCorrect,
+        score: Math.round(answer.score),
+        elapsedMs: answer.isSubmitted ? answer.elapsedMs : null,
+        totalScore: Math.round(totals.get(playerId)?.totalScore ?? 0),
+      };
+    }
+
+    const isLast = questionIndex >= Number(roomFields[1]) - 1;
+    this.onRoundResult?.({
+      roomId,
+      gameId,
+      questionIndex,
+      isLast,
+      leaderboard: this.leaderboardFromTotals(players, totals),
+      perPlayer,
+    });
+    this.schedulePauseThenAdvance(gameId, roomId, isLast);
+    return { gameId, roomId, questionIndex };
+  }
+
+  /**
+   * After the leaderboard pause: the next question (new questionStartTime,
+   * fresh timer, question_started via the gateway) or the game_over flow.
+   */
+  async advanceRound(gameId: string, roomId: string): Promise<void> {
+    const stateKey = `game:${gameId}:state`;
+    const state = await this.redis.client.hgetall(stateKey);
+    if (state.roundStatus !== 'round_result') {
+      return;
+    }
+    const nextIndex = Number(state.currentIndex) + 1;
+    const raw = await this.redis.client.hget(
+      `game:${gameId}:questions`,
+      String(nextIndex),
+    );
+    if (!raw) {
+      return;
+    }
+    const questionStartTime = Date.now();
+    await this.redis.client
+      .multi()
+      .hset(stateKey, {
+        currentIndex: nextIndex,
+        questionStartTime,
+        roundStatus: 'question_active',
+      })
+      .expire(stateKey, ROOM_TTL_SECONDS)
+      .exec();
+
+    const timeLimitSeconds = Number(
+      await this.redis.client.hget(`room:${roomId}`, 'timePerQuestionSeconds'),
+    );
+    this.scheduleRoundTimer(gameId, roomId, timeLimitSeconds);
+    const question = JSON.parse(raw) as GameQuestionSnapshot;
+    this.onQuestionStarted?.(roomId, {
+      gameId,
+      index: question.index,
+      text: question.text,
+      options: question.options,
+      ...(question.imageUrl !== undefined && { imageUrl: question.imageUrl }),
+      timeLimitSeconds,
+      questionStartTime,
+    });
+  }
+
+  /** Leaderboard pause, then the next question or the game_over hook. */
+  private schedulePauseThenAdvance(
+    gameId: string,
+    roomId: string,
+    isLast: boolean,
+  ): void {
+    this.clearRoundTimer(gameId);
+    const timer = setTimeout(() => {
+      this.roundTimers.delete(gameId);
+      if (isLast) {
+        this.onGameOver?.({ gameId, roomId });
+        return;
+      }
+      void this.advanceRound(gameId, roomId).catch(() => undefined);
+    }, ROUND_RESULT_PAUSE_MS);
+    this.roundTimers.set(gameId, timer);
   }
 
   /** Arms the round timer: fires at T + grace and closes the round. */
