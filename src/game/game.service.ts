@@ -232,6 +232,17 @@ export class GameService implements OnModuleDestroy {
   /** Set by the gateway: game_over broadcast with the full reveal. */
   onGameOver?: (roomId: string, payload: GameOverPayload) => void;
 
+  /** Set by the gateway: settings_updated broadcast to the lobby. */
+  onSettingsUpdated?: (roomId: string, settings: RoomState['settings']) => void;
+
+  /**
+   * Bridge for the REST layer (PATCH /rooms/{roomId}, task 0020): a successful
+   * settings update is announced to the lobby as settings_updated.
+   */
+  notifySettingsUpdated(roomId: string, settings: RoomState['settings']): void {
+    this.onSettingsUpdated?.(roomId, settings);
+  }
+
   constructor(
     private readonly redis: RedisService,
     private readonly prisma: PrismaService,

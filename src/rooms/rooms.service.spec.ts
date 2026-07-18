@@ -2,6 +2,7 @@ import { ConflictException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { GameMode } from '../../generated/prisma/enums';
+import { GameService } from '../game/game.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { RoomsService } from './rooms.service';
@@ -11,6 +12,8 @@ describe('RoomsService', () => {
   const bankFindFirst = jest.fn();
   const questionCount = jest.fn();
   const hsetnx = jest.fn();
+  const hgetall = jest.fn();
+  const notifySettingsUpdated = jest.fn();
   const expire = jest.fn();
   const multiExec = jest.fn();
   const multiHset = jest.fn();
@@ -51,8 +54,9 @@ describe('RoomsService', () => {
         },
         {
           provide: RedisService,
-          useValue: { client: { hsetnx, expire, multi: () => multi } },
+          useValue: { client: { hsetnx, hgetall, expire, multi: () => multi } },
         },
+        { provide: GameService, useValue: { notifySettingsUpdated } },
         {
           provide: ConfigService,
           useValue: {
@@ -127,5 +131,70 @@ describe('RoomsService', () => {
     await service.createRoom('host-1', body);
 
     expect(hsetnx).toHaveBeenCalledTimes(2);
+  });
+
+  describe('updateSettings', () => {
+    const settings = {
+      mode: GameMode.solo,
+      questionCount: 7,
+      timePerQuestionSeconds: 15,
+    };
+    const waitingRoom = {
+      status: 'waiting',
+      userId: 'host-1',
+      bankId: 'bank-a',
+      bankName: 'Біологія',
+      mode: 'multiplayer',
+      questionCount: '3',
+      timePerQuestionSeconds: '10',
+    };
+
+    it('404 for a missing room and for a foreign host', async () => {
+      hgetall.mockResolvedValueOnce({}).mockResolvedValueOnce(waitingRoom);
+
+      await expect(
+        service.updateSettings('host-1', 'nope', settings),
+      ).rejects.toThrow(NotFoundException);
+      await expect(
+        service.updateSettings('intruder', 'r1', settings),
+      ).rejects.toThrow(NotFoundException);
+      expect(multiHset).not.toHaveBeenCalled();
+    });
+
+    it('409 when the room is not waiting', async () => {
+      hgetall.mockResolvedValueOnce({ ...waitingRoom, status: 'in_game' });
+
+      await expect(
+        service.updateSettings('host-1', 'r1', settings),
+      ).rejects.toThrow(ConflictException);
+      expect(notifySettingsUpdated).not.toHaveBeenCalled();
+    });
+
+    it('updates Redis, notifies the lobby and returns RoomPublicInfo', async () => {
+      hgetall.mockResolvedValueOnce(waitingRoom);
+
+      const result = await service.updateSettings('host-1', 'r1', settings);
+
+      expect(multiHset).toHaveBeenCalledWith('room:r1', {
+        mode: 'solo',
+        questionCount: 7,
+        timePerQuestionSeconds: 15,
+      });
+      expect(notifySettingsUpdated).toHaveBeenCalledWith('r1', {
+        mode: 'solo',
+        questionCount: 7,
+        timePerQuestionSeconds: 15,
+      });
+      expect(result).toEqual({
+        roomId: 'r1',
+        status: 'waiting',
+        settings: {
+          mode: 'solo',
+          questionCount: 7,
+          timePerQuestionSeconds: 15,
+        },
+        bankName: 'Біологія',
+      });
+    });
   });
 });

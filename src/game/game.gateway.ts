@@ -45,6 +45,8 @@ export class GameGateway implements OnGatewayDisconnect {
       this.server.to(roomId).emit('question_started', question);
     this.gameService.onGameOver = (roomId, payload) =>
       this.server.to(roomId).emit('game_over', payload);
+    this.gameService.onSettingsUpdated = (roomId, settings) =>
+      this.server.to(roomId).emit('settings_updated', { settings });
   }
 
   /**
