@@ -293,6 +293,22 @@ describe('GameGateway', () => {
     expect(serverEmit).toHaveBeenCalledWith('game_over', payload);
   });
 
+  it('sync_time → sync_time_ack with a monotonic server timestamp to the caller', () => {
+    const before = Date.now();
+    gateway.handleSyncTime(client());
+    gateway.handleSyncTime(client());
+    const after = Date.now();
+
+    const calls = emit.mock.calls as [string, { serverTime: number }][];
+    expect(calls).toHaveLength(2);
+    expect(calls[0][0]).toBe('sync_time_ack');
+    const [first, second] = [calls[0][1].serverTime, calls[1][1].serverTime];
+    expect(first).toBeGreaterThanOrEqual(before);
+    expect(second).toBeGreaterThanOrEqual(first);
+    expect(second).toBeLessThanOrEqual(after);
+    expect(serverEmit).not.toHaveBeenCalled();
+  });
+
   it('disconnect of the host → host_changed to the room', async () => {
     handleDisconnect.mockResolvedValue({
       roomId: 'r1',
