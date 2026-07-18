@@ -84,6 +84,14 @@ export class PrismaMock {
     return bank;
   }
 
+  /** Question ids of a bank, in creation order (test helper). */
+  questionIdsOf(bankId: string): string[] {
+    return this.questions
+      .filter((q) => q.bankId === bankId)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .map((q) => q.id);
+  }
+
   /** Introspection for cascade assertions. */
   counts(): { banks: number; questions: number; answerSets: number } {
     return {
@@ -233,6 +241,47 @@ export class PrismaMock {
   };
 
   question = {
+    updateMany: ({
+      where,
+      data,
+    }: {
+      where: { id: string; bank: { userId: string } };
+      data: { text?: string; imageUrl?: string; referenceAnswer?: string };
+    }) => {
+      const question = this.questions.find((q) => q.id === where.id);
+      if (!question) return Promise.resolve({ count: 0 });
+      const bank = this.banks.find(
+        (b) => b.id === question.bankId && b.userId === where.bank.userId,
+      );
+      if (!bank) return Promise.resolve({ count: 0 });
+      if (data.text !== undefined) question.text = data.text;
+      if (data.imageUrl !== undefined) question.imageUrl = data.imageUrl;
+      if (data.referenceAnswer !== undefined)
+        question.referenceAnswer = data.referenceAnswer;
+      return Promise.resolve({ count: 1 });
+    },
+    findFirst: ({
+      where,
+    }: {
+      where: { id: string; bank: { userId: string } };
+    }) => {
+      const question = this.questions.find((q) => q.id === where.id);
+      if (!question) return Promise.resolve(null);
+      const owned = this.banks.some(
+        (b) => b.id === question.bankId && b.userId === where.bank.userId,
+      );
+      return Promise.resolve(owned ? { id: question.id } : null);
+    },
+    findUnique: ({ where }: { where: { id: string } }) => {
+      const question = this.questions.find((q) => q.id === where.id);
+      if (!question) return Promise.resolve(null);
+      return Promise.resolve({
+        ...question,
+        answerSet: this.answerSets.get(question.id)
+          ? { ...this.answerSets.get(question.id)! }
+          : null,
+      });
+    },
     create: ({
       data,
     }: {
