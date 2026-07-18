@@ -233,6 +233,27 @@ export class PrismaMock {
   };
 
   question = {
+    create: ({
+      data,
+    }: {
+      data: {
+        bankId: string;
+        text: string;
+        imageUrl?: string;
+        referenceAnswer?: string;
+      };
+    }) => {
+      const question: StoredQuestion = {
+        id: randomUUID(),
+        bankId: data.bankId,
+        text: data.text,
+        imageUrl: data.imageUrl ?? null,
+        referenceAnswer: data.referenceAnswer ?? null,
+        createdAt: new Date(Date.now() + ++this.sequence * 1000),
+      };
+      this.questions.push(question);
+      return Promise.resolve({ ...question });
+    },
     deleteMany: ({
       where,
     }: {
