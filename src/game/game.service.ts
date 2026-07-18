@@ -46,6 +46,19 @@ interface StoredPlayer {
   isHost: boolean;
   connected: boolean;
   resumeToken: string;
+  /** Join order for host succession (host_changed); ms timestamp. */
+  joinedAt: number;
+}
+
+/** host_changed broadcast (asyncapi PlayerRefPayload). */
+export interface PlayerRefPayload {
+  playerId: string;
+}
+
+/** What the gateway broadcasts after a socket drops. */
+export interface DisconnectResult {
+  roomId: string;
+  hostChanged?: PlayerRefPayload;
 }
 
 /** game_started broadcast (asyncapi GameStartedPayload). */
@@ -137,12 +150,18 @@ export class GameService {
     }
 
     const playerId = randomUUID();
+    // A valid hostToken grants the host role only while the room has no host:
+    // after a host_changed transfer the returning creator is a regular player.
+    const roomHasHost = Object.values(players).some((player) => player.isHost);
     const stored: StoredPlayer = {
       nickname: payload.nickname,
       isHost:
-        payload.hostToken !== undefined && payload.hostToken === room.hostToken,
+        !roomHasHost &&
+        payload.hostToken !== undefined &&
+        payload.hostToken === room.hostToken,
       connected: true,
       resumeToken: randomBytes(24).toString('base64url'),
+      joinedAt: Date.now(),
     };
     await this.redis.client
       .multi()
@@ -206,6 +225,52 @@ export class GameService {
       }
     }
     return { room: state, player: this.toView(payload.playerId, stored) };
+  }
+
+  /**
+   * Socket drop: marks the player offline; when the host drops, the role
+   * moves to the earliest-joined connected player (realtime-protocol.md) -
+   * the old host does not get it back on return. Returns what to broadcast,
+   * or null when the socket had no live room membership.
+   */
+  async handleDisconnect(session: {
+    roomId?: string;
+    playerId?: string;
+  }): Promise<DisconnectResult | null> {
+    const { roomId, playerId } = session;
+    if (!roomId || !playerId) {
+      return null;
+    }
+    const playersKey = `room:${roomId}:players`;
+    const players = await this.loadPlayers(playersKey);
+    const stored = players[playerId];
+    if (!stored) {
+      return null;
+    }
+
+    stored.connected = false;
+    const multi = this.redis.client
+      .multi()
+      .hset(playersKey, playerId, JSON.stringify(stored));
+
+    let hostChanged: PlayerRefPayload | undefined;
+    if (stored.isHost) {
+      const successor = Object.entries(players)
+        .filter(([id, player]) => id !== playerId && player.connected)
+        .sort(([, a], [, b]) => a.joinedAt - b.joinedAt)[0];
+      if (successor) {
+        const [successorId, successorStored] = successor;
+        stored.isHost = false;
+        successorStored.isHost = true;
+        multi
+          .hset(playersKey, playerId, JSON.stringify(stored))
+          .hset(playersKey, successorId, JSON.stringify(successorStored));
+        hostChanged = { playerId: successorId };
+      }
+    }
+    await multi.exec();
+
+    return { roomId, ...(hostChanged && { hostChanged }) };
   }
 
   /** Player-safe ActiveQuestion of the running game, with the time left. */

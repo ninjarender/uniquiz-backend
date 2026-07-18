@@ -151,6 +151,123 @@ describe('GameService', () => {
     expect(result.player.isHost).toBe(false);
   });
 
+  it('a valid hostToken does not reclaim the role after a host_changed transfer', async () => {
+    hgetall.mockResolvedValueOnce(waitingRoom).mockResolvedValueOnce({
+      'p-2': JSON.stringify({
+        nickname: 'Olia',
+        isHost: true,
+        connected: true,
+        resumeToken: 't',
+        joinedAt: 1,
+      }),
+    });
+
+    const result = await service.joinRoom({
+      roomId: 'r1',
+      nickname: 'Vadym',
+      hostToken: 'secret-token',
+    });
+
+    expect(result.player.isHost).toBe(false);
+  });
+
+  describe('handleDisconnect', () => {
+    const stored = (
+      nickname: string,
+      isHost: boolean,
+      connected: boolean,
+      joinedAt: number,
+    ) => ({ nickname, isHost, connected, resumeToken: 't', joinedAt });
+    const asHash = (players: Record<string, object>) =>
+      Object.fromEntries(
+        Object.entries(players).map(([id, player]) => [
+          id,
+          JSON.stringify(player),
+        ]),
+      );
+    const writtenPlayers = () =>
+      Object.fromEntries(
+        (multiHset.mock.calls as string[][]).map(([, id, json]) => [
+          id,
+          JSON.parse(json) as { isHost: boolean; connected: boolean },
+        ]),
+      );
+
+    it('null without a live session', async () => {
+      expect(await service.handleDisconnect({})).toBeNull();
+      expect(hgetall).not.toHaveBeenCalled();
+    });
+
+    it('a regular player drop: offline mark, no host change', async () => {
+      hgetall.mockResolvedValueOnce(
+        asHash({
+          'p-host': stored('Vadym', true, true, 1),
+          'p-2': stored('Olia', false, true, 2),
+        }),
+      );
+
+      const result = await service.handleDisconnect({
+        roomId: 'r1',
+        playerId: 'p-2',
+      });
+
+      expect(result).toEqual({ roomId: 'r1' });
+      expect(Object.keys(writtenPlayers())).toEqual(['p-2']);
+      expect(writtenPlayers()['p-2']).toMatchObject({
+        connected: false,
+        isHost: false,
+      });
+    });
+
+    it('host drop: the earliest-joined connected player becomes the host', async () => {
+      hgetall.mockResolvedValueOnce(
+        asHash({
+          'p-host': stored('Vadym', true, true, 1),
+          'p-2': stored('Olia', false, false, 2),
+          'p-3': stored('Petro', false, true, 3),
+          'p-4': stored('Ira', false, true, 4),
+        }),
+      );
+
+      const result = await service.handleDisconnect({
+        roomId: 'r1',
+        playerId: 'p-host',
+      });
+
+      expect(result).toEqual({
+        roomId: 'r1',
+        hostChanged: { playerId: 'p-3' },
+      });
+      const written = writtenPlayers();
+      expect(written['p-host']).toMatchObject({
+        connected: false,
+        isHost: false,
+      });
+      expect(written['p-3']).toMatchObject({ connected: true, isHost: true });
+      expect(written['p-4']).toBeUndefined();
+    });
+
+    it('host drop with nobody else online: role stays, no broadcast', async () => {
+      hgetall.mockResolvedValueOnce(
+        asHash({
+          'p-host': stored('Vadym', true, true, 1),
+          'p-2': stored('Olia', false, false, 2),
+        }),
+      );
+
+      const result = await service.handleDisconnect({
+        roomId: 'r1',
+        playerId: 'p-host',
+      });
+
+      expect(result).toEqual({ roomId: 'r1' });
+      expect(writtenPlayers()['p-host']).toMatchObject({
+        connected: false,
+        isHost: true,
+      });
+    });
+  });
+
   describe('rejoinRoom', () => {
     const stored = (resumeToken: string) =>
       JSON.stringify({

@@ -8,6 +8,7 @@ describe('GameGateway', () => {
   const joinRoom = jest.fn();
   const rejoinRoom = jest.fn();
   const startGame = jest.fn();
+  const handleDisconnect = jest.fn();
   const serverEmit = jest.fn();
   const emit = jest.fn();
   const roomEmit = jest.fn();
@@ -36,7 +37,10 @@ describe('GameGateway', () => {
     const moduleRef = await Test.createTestingModule({
       providers: [
         GameGateway,
-        { provide: GameService, useValue: { joinRoom, rejoinRoom, startGame } },
+        {
+          provide: GameService,
+          useValue: { joinRoom, rejoinRoom, startGame, handleDisconnect },
+        },
       ],
     }).compile();
     gateway = moduleRef.get(GameGateway);
@@ -134,6 +138,34 @@ describe('GameGateway', () => {
       code: 'not_host',
       message: 'Only the host',
     });
+  });
+
+  it('disconnect of the host → host_changed to the room', async () => {
+    handleDisconnect.mockResolvedValue({
+      roomId: 'r1',
+      hostChanged: { playerId: 'p-2' },
+    });
+    const socket = client();
+    socket.data.roomId = 'r1';
+    socket.data.playerId = 'p-1';
+
+    await gateway.handleDisconnect(socket);
+
+    expect(handleDisconnect).toHaveBeenCalledWith({
+      roomId: 'r1',
+      playerId: 'p-1',
+    });
+    expect(serverEmit).toHaveBeenCalledWith('host_changed', {
+      playerId: 'p-2',
+    });
+  });
+
+  it('disconnect of a regular player → no host_changed', async () => {
+    handleDisconnect.mockResolvedValue({ roomId: 'r1' });
+
+    await gateway.handleDisconnect(client());
+
+    expect(serverEmit).not.toHaveBeenCalled();
   });
 
   it('GameError from the service → error event with its code', async () => {
