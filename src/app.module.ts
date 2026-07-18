@@ -9,6 +9,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { RoomsModule } from './rooms/rooms.module';
 import { GameModule } from './game/game.module';
+import { ResultsModule } from './results/results.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { GameModule } from './game/game.module';
     QuestionsModule,
     RoomsModule,
     GameModule,
+    ResultsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
