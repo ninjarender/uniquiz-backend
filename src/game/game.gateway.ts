@@ -3,7 +3,9 @@ import {
   MessageBody,
   SubscribeMessage,
   WebSocketGateway,
+  WebSocketServer,
 } from '@nestjs/websockets';
+import { Server } from 'socket.io';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { DefaultEventsMap, Socket } from 'socket.io';
@@ -30,6 +32,9 @@ type GameSocket = Socket<
  */
 @WebSocketGateway({ cors: { origin: true } })
 export class GameGateway {
+  @WebSocketServer()
+  server!: Server;
+
   constructor(private readonly gameService: GameService) {}
 
   /** join_room → join_ack to the joiner + player_joined to the rest of the room. */
@@ -49,6 +54,23 @@ export class GameGateway {
 
       client.emit('join_ack', { playerId, resumeToken, room });
       client.to(payload.roomId).emit('player_joined', { player });
+    } catch (error) {
+      this.emitError(client, error);
+    }
+  }
+
+  /**
+   * start_game (host, no payload) → game_started to the whole room, then the
+   * first question_started (contract order: game_started strictly first).
+   */
+  @SubscribeMessage('start_game')
+  async handleStartGame(@ConnectedSocket() client: GameSocket): Promise<void> {
+    try {
+      const { roomId, gameStarted, questionStarted } =
+        await this.gameService.startGame(client.data);
+
+      this.server.to(roomId).emit('game_started', gameStarted);
+      this.server.to(roomId).emit('question_started', questionStarted);
     } catch (error) {
       this.emitError(client, error);
     }

@@ -6,6 +6,8 @@ import { GameService, JoinResult } from './game.service';
 describe('GameGateway', () => {
   let gateway: GameGateway;
   const joinRoom = jest.fn();
+  const startGame = jest.fn();
+  const serverEmit = jest.fn();
   const emit = jest.fn();
   const roomEmit = jest.fn();
   const join = jest.fn();
@@ -33,10 +35,11 @@ describe('GameGateway', () => {
     const moduleRef = await Test.createTestingModule({
       providers: [
         GameGateway,
-        { provide: GameService, useValue: { joinRoom } },
+        { provide: GameService, useValue: { joinRoom, startGame } },
       ],
     }).compile();
     gateway = moduleRef.get(GameGateway);
+    gateway.server = { to: jest.fn(() => ({ emit: serverEmit })) } as never;
   });
 
   it('join_room: join_ack to the joiner, player_joined to the rest', async () => {
@@ -66,6 +69,36 @@ describe('GameGateway', () => {
       'error',
       expect.objectContaining({ code: 'invalid_payload' }),
     );
+  });
+
+  it('start_game: game_started then question_started to the whole room', async () => {
+    startGame.mockResolvedValue({
+      roomId: 'r1',
+      gameStarted: { gameId: 'g1' },
+      questionStarted: { gameId: 'g1', index: 0 },
+    });
+    const socket = client();
+    socket.data.roomId = 'r1';
+    socket.data.playerId = 'p-1';
+
+    await gateway.handleStartGame(socket);
+
+    expect(startGame).toHaveBeenCalledWith({ roomId: 'r1', playerId: 'p-1' });
+    expect(serverEmit.mock.calls).toEqual([
+      ['game_started', { gameId: 'g1' }],
+      ['question_started', { gameId: 'g1', index: 0 }],
+    ]);
+  });
+
+  it('start_game error → error event to the caller only', async () => {
+    startGame.mockRejectedValue(new GameError('not_host', 'Only the host'));
+
+    await gateway.handleStartGame(client());
+
+    expect(emit).toHaveBeenCalledWith('error', {
+      code: 'not_host',
+      message: 'Only the host',
+    });
   });
 
   it('GameError from the service → error event with its code', async () => {
