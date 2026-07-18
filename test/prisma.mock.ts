@@ -115,8 +115,26 @@ export class PrismaMock {
     deleteMany: ({
       where,
     }: {
-      where: { question: { bankId: string; bank: { userId: string } } };
+      where: {
+        questionId?: string;
+        question: {
+          bankId?: string;
+          bank: { userId: string };
+        };
+      };
     }) => {
+      if (where.questionId !== undefined) {
+        const question = this.questions.find((q) => q.id === where.questionId);
+        if (!question) return Promise.resolve({ count: 0 });
+        const owned = this.banks.some(
+          (b) =>
+            b.id === question.bankId && b.userId === where.question.bank.userId,
+        );
+        if (!owned) return Promise.resolve({ count: 0 });
+        return Promise.resolve({
+          count: this.answerSets.delete(question.id) ? 1 : 0,
+        });
+      }
       const bank = this.banks.find(
         (b) =>
           b.id === where.question.bankId &&
@@ -306,8 +324,20 @@ export class PrismaMock {
     deleteMany: ({
       where,
     }: {
-      where: { bankId: string; bank: { userId: string } };
+      where: { id?: string; bankId?: string; bank: { userId: string } };
     }) => {
+      if (where.id !== undefined) {
+        const index = this.questions.findIndex((q) => q.id === where.id);
+        if (index === -1) return Promise.resolve({ count: 0 });
+        const owned = this.banks.some(
+          (b) =>
+            b.id === this.questions[index].bankId &&
+            b.userId === where.bank.userId,
+        );
+        if (!owned) return Promise.resolve({ count: 0 });
+        this.questions.splice(index, 1);
+        return Promise.resolve({ count: 1 });
+      }
       const bank = this.banks.find(
         (b) => b.id === where.bankId && b.userId === where.bank.userId,
       );

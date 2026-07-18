@@ -169,4 +169,60 @@ describe('Questions endpoints (e2e)', () => {
         .expect(400);
     });
   });
+
+  describe('DELETE /api/v1/questions/{questionId}', () => {
+    it('204: deletes a question with its answer set', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const seeded = prismaMock.seedBank(idA, 'Del QA', 2, 1);
+      const [withSet, withoutSet] = prismaMock.questionIdsOf(seeded.id);
+      const before = prismaMock.counts();
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/questions/${withSet}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(204);
+
+      let after = prismaMock.counts();
+      expect(before.questions - after.questions).toBe(1);
+      expect(before.answerSets - after.answerSets).toBe(1);
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/questions/${withoutSet}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(204);
+
+      after = prismaMock.counts();
+      expect(before.questions - after.questions).toBe(2);
+      expect(before.answerSets - after.answerSets).toBe(1);
+    });
+
+    it('404: foreign question cannot be deleted', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const seeded = prismaMock.seedBank(idA, 'Safe QA', 1, 1);
+      const [questionId] = prismaMock.questionIdsOf(seeded.id);
+      const before = prismaMock.counts();
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/questions/${questionId}`)
+        .set('Authorization', `Bearer ${tokenB}`)
+        .expect(404);
+
+      expect(prismaMock.counts()).toEqual(before);
+    });
+
+    it('404: repeated deletion', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const seeded = prismaMock.seedBank(idA, 'Once QA', 1, 0);
+      const [questionId] = prismaMock.questionIdsOf(seeded.id);
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/questions/${questionId}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(204);
+      await request(app.getHttpServer())
+        .delete(`/api/v1/questions/${questionId}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(404);
+    });
+  });
 });

@@ -108,4 +108,22 @@ export class QuestionsService {
         : undefined,
     };
   }
+
+  /**
+   * Deletes the host's own question together with its answer set
+   * (explicit transaction - FKs are RESTRICT). 404 for foreign/missing.
+   */
+  async deleteQuestion(userId: string, questionId: string): Promise<void> {
+    const [, { count }] = await this.prisma.$transaction([
+      this.prisma.answerSet.deleteMany({
+        where: { questionId, question: { bank: { userId } } },
+      }),
+      this.prisma.question.deleteMany({
+        where: { id: questionId, bank: { userId } },
+      }),
+    ]);
+    if (count === 0) {
+      throw new NotFoundException('Question not found');
+    }
+  }
 }
