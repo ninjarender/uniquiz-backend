@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { randomBytes, randomInt, randomUUID } from 'crypto';
+import { ChainableCommander } from 'ioredis';
 import { AnswerSetStatus } from '../../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
@@ -255,22 +256,105 @@ export class GameService {
 
     let hostChanged: PlayerRefPayload | undefined;
     if (stored.isHost) {
-      const successor = Object.entries(players)
-        .filter(([id, player]) => id !== playerId && player.connected)
-        .sort(([, a], [, b]) => a.joinedAt - b.joinedAt)[0];
-      if (successor) {
-        const [successorId, successorStored] = successor;
+      const successorId = this.transferHost(
+        multi,
+        playersKey,
+        players,
+        playerId,
+      );
+      if (successorId) {
         stored.isHost = false;
-        successorStored.isHost = true;
-        multi
-          .hset(playersKey, playerId, JSON.stringify(stored))
-          .hset(playersKey, successorId, JSON.stringify(successorStored));
+        multi.hset(playersKey, playerId, JSON.stringify(stored));
         hostChanged = { playerId: successorId };
       }
     }
     await multi.exec();
 
     return { roomId, ...(hostChanged && { hostChanged }) };
+  }
+
+  /**
+   * leave_room: lobby-only (business-rules.md - joining and leaving are
+   * waiting-stage actions; mid-game drops are disconnects, not leaves).
+   * Removes the player; a leaving host hands the role over per the
+   * host_changed rule. Returns the broadcasts for the remaining players.
+   */
+  async leaveRoom(session: { roomId?: string; playerId?: string }): Promise<{
+    roomId: string;
+    playerLeft: PlayerRefPayload;
+    hostChanged?: PlayerRefPayload;
+  }> {
+    const { roomId, playerId } = session;
+    if (!roomId || !playerId) {
+      throw new GameError('not_a_member', 'Join a room first');
+    }
+    const roomKey = `room:${roomId}`;
+    const playersKey = `${roomKey}:players`;
+
+    const room = await this.redis.client.hgetall(roomKey);
+    if (Object.keys(room).length === 0) {
+      throw new GameError('room_not_found', 'Room not found');
+    }
+    if (room.status !== 'waiting') {
+      throw new GameError(
+        'room_not_waiting',
+        'Leaving is a lobby action; a running game treats drops as disconnects',
+      );
+    }
+
+    const players = await this.loadPlayers(playersKey);
+    const stored = players[playerId];
+    if (!stored) {
+      throw new GameError('not_a_member', 'You are not in this room');
+    }
+
+    const multi = this.redis.client
+      .multi()
+      .hdel(playersKey, playerId)
+      .expire(roomKey, ROOM_TTL_SECONDS)
+      .expire(playersKey, ROOM_TTL_SECONDS);
+
+    let hostChanged: PlayerRefPayload | undefined;
+    if (stored.isHost) {
+      const successorId = this.transferHost(
+        multi,
+        playersKey,
+        players,
+        playerId,
+      );
+      if (successorId) {
+        hostChanged = { playerId: successorId };
+      }
+    }
+    await multi.exec();
+
+    return {
+      roomId,
+      playerLeft: { playerId },
+      ...(hostChanged && { hostChanged }),
+    };
+  }
+
+  /**
+   * Queues the host handover to the earliest-joined connected player other
+   * than excludeId (realtime-protocol.md); returns the successor id or null.
+   */
+  private transferHost(
+    multi: ChainableCommander,
+    playersKey: string,
+    players: Record<string, StoredPlayer>,
+    excludeId: string,
+  ): string | null {
+    const successor = Object.entries(players)
+      .filter(([id, player]) => id !== excludeId && player.connected)
+      .sort(([, a], [, b]) => a.joinedAt - b.joinedAt)[0];
+    if (!successor) {
+      return null;
+    }
+    const [successorId, successorStored] = successor;
+    successorStored.isHost = true;
+    multi.hset(playersKey, successorId, JSON.stringify(successorStored));
+    return successorId;
   }
 
   /** Player-safe ActiveQuestion of the running game, with the time left. */

@@ -103,6 +103,29 @@ export class GameGateway implements OnGatewayDisconnect {
   }
 
   /**
+   * leave_room (lobby only, no payload) → player_left to the remaining
+   * players, plus host_changed when the leaver was the host.
+   */
+  @SubscribeMessage('leave_room')
+  async handleLeaveRoom(@ConnectedSocket() client: GameSocket): Promise<void> {
+    try {
+      const { roomId, playerLeft, hostChanged } =
+        await this.gameService.leaveRoom(client.data);
+
+      await client.leave(roomId);
+      client.data.roomId = undefined;
+      client.data.playerId = undefined;
+
+      this.server.to(roomId).emit('player_left', playerLeft);
+      if (hostChanged) {
+        this.server.to(roomId).emit('host_changed', hostChanged);
+      }
+    } catch (error) {
+      this.emitError(client, error);
+    }
+  }
+
+  /**
    * start_game (host, no payload) → game_started to the whole room, then the
    * first question_started (contract order: game_started strictly first).
    */
