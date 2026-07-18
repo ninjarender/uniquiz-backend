@@ -6,6 +6,7 @@ import { GameService, JoinResult } from './game.service';
 describe('GameGateway', () => {
   let gateway: GameGateway;
   const joinRoom = jest.fn();
+  const rejoinRoom = jest.fn();
   const startGame = jest.fn();
   const serverEmit = jest.fn();
   const emit = jest.fn();
@@ -35,7 +36,7 @@ describe('GameGateway', () => {
     const moduleRef = await Test.createTestingModule({
       providers: [
         GameGateway,
-        { provide: GameService, useValue: { joinRoom, startGame } },
+        { provide: GameService, useValue: { joinRoom, rejoinRoom, startGame } },
       ],
     }).compile();
     gateway = moduleRef.get(GameGateway);
@@ -65,6 +66,40 @@ describe('GameGateway', () => {
     await gateway.handleJoinRoom(client(), { roomId: 'r1' });
 
     expect(joinRoom).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith(
+      'error',
+      expect.objectContaining({ code: 'invalid_payload' }),
+    );
+  });
+
+  it('rejoin_room: room_state to the caller, player_connection to the rest', async () => {
+    rejoinRoom.mockResolvedValue({
+      room: { roomId: 'r1', status: 'in_game' },
+      player: { id: 'p-1', nickname: 'Olia', isHost: false, connected: true },
+    });
+    const socket = client();
+
+    await gateway.handleRejoinRoom(socket, {
+      roomId: 'r1',
+      playerId: 'p-1',
+      resumeToken: 'tok',
+    });
+
+    expect(join).toHaveBeenCalledWith('r1');
+    expect(socket.data).toEqual({ roomId: 'r1', playerId: 'p-1' });
+    expect(emit).toHaveBeenCalledWith('room_state', {
+      roomId: 'r1',
+      status: 'in_game',
+    });
+    expect(roomEmit).toHaveBeenCalledWith('player_connection', {
+      playerId: 'p-1',
+      connected: true,
+    });
+  });
+
+  it('rejoin_room without resumeToken → invalid_payload', async () => {
+    await gateway.handleRejoinRoom(client(), { roomId: 'r1', playerId: 'p' });
+
     expect(emit).toHaveBeenCalledWith(
       'error',
       expect.objectContaining({ code: 'invalid_payload' }),

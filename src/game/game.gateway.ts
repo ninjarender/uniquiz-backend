@@ -11,6 +11,7 @@ import { validate } from 'class-validator';
 import { DefaultEventsMap, Socket } from 'socket.io';
 import { GameError } from './game-error';
 import { JoinRoomDto } from './dto/join-room.dto';
+import { RejoinRoomDto } from './dto/rejoin-room.dto';
 import { GameService } from './game.service';
 
 /** Per-socket session: which player in which room this connection is. */
@@ -54,6 +55,33 @@ export class GameGateway {
 
       client.emit('join_ack', { playerId, resumeToken, room });
       client.to(payload.roomId).emit('player_joined', { player });
+    } catch (error) {
+      this.emitError(client, error);
+    }
+  }
+
+  /**
+   * rejoin_room → room_state snapshot to the reconnecting player +
+   * player_connection(connected=true) to the rest. Works at any stage.
+   */
+  @SubscribeMessage('rejoin_room')
+  async handleRejoinRoom(
+    @ConnectedSocket() client: GameSocket,
+    @MessageBody() body: unknown,
+  ): Promise<void> {
+    try {
+      const payload = await this.parse(RejoinRoomDto, body);
+      const { room, player } = await this.gameService.rejoinRoom(payload);
+
+      client.data.roomId = payload.roomId;
+      client.data.playerId = player.id;
+      await client.join(payload.roomId);
+
+      client.emit('room_state', room);
+      client.to(payload.roomId).emit('player_connection', {
+        playerId: player.id,
+        connected: true,
+      });
     } catch (error) {
       this.emitError(client, error);
     }

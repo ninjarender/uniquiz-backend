@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { GameError } from './game-error';
 import { JoinRoomDto } from './dto/join-room.dto';
+import { RejoinRoomDto } from './dto/rejoin-room.dto';
 
 /** Player as seen by clients (common.yaml Player). */
 export interface PlayerView {
@@ -14,7 +15,10 @@ export interface PlayerView {
   connected: boolean;
 }
 
-/** RoomState snapshot (waiting stage: no currentQuestion/leaderboard yet). */
+/**
+ * RoomState snapshot: lobby in waiting; in in_game also the current question
+ * with the time left (leaderboard arrives with round results - task 0038).
+ */
 export interface RoomState {
   roomId: string;
   status: string;
@@ -25,6 +29,7 @@ export interface RoomState {
   };
   bankName: string;
   players: PlayerView[];
+  currentQuestion?: ActiveQuestionPayload & { remainingSeconds: number };
 }
 
 /** join_ack payload plus the broadcast-ready player entry. */
@@ -155,6 +160,82 @@ export class GameService {
         [playerId]: stored,
       }),
       player,
+    };
+  }
+
+  /**
+   * rejoin_room: recognized by playerId + resumeToken at any stage
+   * (business-rules.md). Marks the player connected and returns the full
+   * room_state snapshot; in in_game it includes the current question with
+   * remainingSeconds so the client can pick up the round mid-flight.
+   */
+  async rejoinRoom(
+    payload: RejoinRoomDto,
+  ): Promise<{ room: RoomState; player: PlayerView }> {
+    const roomKey = `room:${payload.roomId}`;
+    const playersKey = `${roomKey}:players`;
+
+    const room = await this.redis.client.hgetall(roomKey);
+    if (Object.keys(room).length === 0) {
+      throw new GameError('room_not_found', 'Room not found');
+    }
+
+    const players = await this.loadPlayers(playersKey);
+    const stored = players[payload.playerId];
+    // Unknown playerId and wrong token are the same error - no membership probing.
+    if (!stored || stored.resumeToken !== payload.resumeToken) {
+      throw new GameError('invalid_resume_token', 'Invalid resume credentials');
+    }
+
+    stored.connected = true;
+    await this.redis.client
+      .multi()
+      .hset(playersKey, payload.playerId, JSON.stringify(stored))
+      .expire(roomKey, ROOM_TTL_SECONDS)
+      .expire(playersKey, ROOM_TTL_SECONDS)
+      .exec();
+
+    const state = this.toRoomState(payload.roomId, room, players);
+    if (room.status === 'in_game' && room.gameId) {
+      const currentQuestion = await this.loadCurrentQuestion(
+        room.gameId,
+        Number(room.timePerQuestionSeconds),
+      );
+      if (currentQuestion) {
+        state.currentQuestion = currentQuestion;
+      }
+    }
+    return { room: state, player: this.toView(payload.playerId, stored) };
+  }
+
+  /** Player-safe ActiveQuestion of the running game, with the time left. */
+  private async loadCurrentQuestion(
+    gameId: string,
+    timeLimitSeconds: number,
+  ): Promise<(ActiveQuestionPayload & { remainingSeconds: number }) | null> {
+    const state = await this.redis.client.hgetall(`game:${gameId}:state`);
+    if (Object.keys(state).length === 0) {
+      return null;
+    }
+    const raw = await this.redis.client.hget(
+      `game:${gameId}:questions`,
+      state.currentIndex,
+    );
+    if (!raw) {
+      return null;
+    }
+    const question = JSON.parse(raw) as GameQuestionSnapshot;
+    const questionStartTime = Number(state.questionStartTime);
+    const elapsedSeconds = (Date.now() - questionStartTime) / 1000;
+    return {
+      gameId,
+      index: question.index,
+      text: question.text,
+      options: question.options,
+      ...(question.imageUrl !== undefined && { imageUrl: question.imageUrl }),
+      timeLimitSeconds,
+      questionStartTime,
+      remainingSeconds: Math.max(0, timeLimitSeconds - elapsedSeconds),
     };
   }
 
