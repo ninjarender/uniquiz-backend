@@ -13,6 +13,7 @@ import { DefaultEventsMap, Socket } from 'socket.io';
 import { GameError } from './game-error';
 import { JoinRoomDto } from './dto/join-room.dto';
 import { RejoinRoomDto } from './dto/rejoin-room.dto';
+import { SubmitAnswerDto } from './dto/submit-answer.dto';
 import { GameService } from './game.service';
 
 /** Per-socket session: which player in which room this connection is. */
@@ -137,6 +138,24 @@ export class GameGateway implements OnGatewayDisconnect {
 
       this.server.to(roomId).emit('game_started', gameStarted);
       this.server.to(roomId).emit('question_started', questionStarted);
+    } catch (error) {
+      this.emitError(client, error);
+    }
+  }
+
+  /**
+   * submit_answer → submit_answer_ack to the sender. When the last player
+   * submits, the round is marked closed (round_result broadcast - task 0038).
+   */
+  @SubscribeMessage('submit_answer')
+  async handleSubmitAnswer(
+    @ConnectedSocket() client: GameSocket,
+    @MessageBody() body: unknown,
+  ): Promise<void> {
+    try {
+      const payload = await this.parse(SubmitAnswerDto, body);
+      const { ack } = await this.gameService.submitAnswer(client.data, payload);
+      client.emit('submit_answer_ack', ack);
     } catch (error) {
       this.emitError(client, error);
     }

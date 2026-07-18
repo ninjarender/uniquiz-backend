@@ -7,6 +7,7 @@ import { RedisService } from '../redis/redis.service';
 import { GameError } from './game-error';
 import { JoinRoomDto } from './dto/join-room.dto';
 import { RejoinRoomDto } from './dto/rejoin-room.dto';
+import { SubmitAnswerDto } from './dto/submit-answer.dto';
 
 /** Player as seen by clients (common.yaml Player). */
 export interface PlayerView {
@@ -86,6 +87,27 @@ export interface StartGameResult {
   roomId: string;
   gameStarted: GameStartedPayload;
   questionStarted: ActiveQuestionPayload;
+}
+
+/** submit_answer_ack payload (asyncapi SubmitAnswerAck). */
+export interface SubmitAnswerAck {
+  accepted: boolean;
+  questionIndex: number;
+}
+
+/**
+ * Server-side answer record in game:{gameId}:answers:{index} (data-model.md).
+ * score/isCorrect are computed at fixation from the server clock and never
+ * sent to the player before round_result.
+ */
+interface StoredAnswer {
+  selectedOptionIndex: number;
+  isSubmitted: boolean;
+  answerTime: number;
+  elapsedMs: number;
+  score: number;
+  isCorrect: boolean;
+  auto: boolean;
 }
 
 /**
@@ -355,6 +377,104 @@ export class GameService {
     successorStored.isHost = true;
     multi.hset(playersKey, successorId, JSON.stringify(successorStored));
     return successorId;
+  }
+
+  /**
+   * submit_answer: fixes the player's answer with server-side time and score
+   * (business-rules.md). A confirmed answer is final - repeats are answered
+   * with accepted=false; a closed/timed-out round is a question_finished
+   * error. When every player of the room has submitted, the round is marked
+   * closed early (round_result broadcast - task 0038).
+   */
+  async submitAnswer(
+    session: { roomId?: string; playerId?: string },
+    payload: SubmitAnswerDto,
+  ): Promise<{ ack: SubmitAnswerAck; roomId: string; allSubmitted: boolean }> {
+    const { roomId, playerId } = session;
+    if (!roomId || !playerId) {
+      throw new GameError('not_a_member', 'Join a room first');
+    }
+
+    const room = await this.redis.client.hgetall(`room:${roomId}`);
+    if (Object.keys(room).length === 0) {
+      throw new GameError('room_not_found', 'Room not found');
+    }
+    if (room.gameId !== payload.gameId) {
+      throw new GameError('invalid_payload', 'Unknown game for this room');
+    }
+    if (room.status !== 'in_game') {
+      throw new GameError('question_finished', 'The game is not running');
+    }
+
+    const stateKey = `game:${payload.gameId}:state`;
+    const state = await this.redis.client.hgetall(stateKey);
+    const questionStartTime = Number(state.questionStartTime);
+    const timeLimitMs = Number(room.timePerQuestionSeconds) * 1000;
+    const answerTime = Date.now();
+    const elapsedMs = answerTime - questionStartTime;
+    if (
+      state.roundStatus !== 'question_active' ||
+      payload.questionIndex !== Number(state.currentIndex) ||
+      elapsedMs > timeLimitMs
+    ) {
+      throw new GameError('question_finished', 'This round is already over');
+    }
+
+    const answersKey = `game:${payload.gameId}:answers:${payload.questionIndex}`;
+    const existing = await this.redis.client.hget(answersKey, playerId);
+    if (existing) {
+      // A confirmed answer is final; repeats and changes are ignored.
+      return {
+        ack: { accepted: false, questionIndex: payload.questionIndex },
+        roomId,
+        allSubmitted: false,
+      };
+    }
+
+    const rawQuestion = await this.redis.client.hget(
+      `game:${payload.gameId}:questions`,
+      String(payload.questionIndex),
+    );
+    if (!rawQuestion) {
+      throw new GameError('question_finished', 'This round is already over');
+    }
+    const question = JSON.parse(rawQuestion) as GameQuestionSnapshot;
+
+    // Trap: any chosen option scores 0 (the 500 for staying silent is granted
+    // at round close - task 0038). Normal: exact 500 - 30/s, no rounding.
+    const isCorrect =
+      !question.isTrap && payload.selectedOptionIndex === question.correctIndex;
+    const score = isCorrect ? Math.max(500 - (30 * elapsedMs) / 1000, 0) : 0;
+    const stored: StoredAnswer = {
+      selectedOptionIndex: payload.selectedOptionIndex,
+      isSubmitted: true,
+      answerTime,
+      elapsedMs,
+      score,
+      isCorrect,
+      auto: payload.auto ?? false,
+    };
+    await this.redis.client
+      .multi()
+      .hset(answersKey, playerId, JSON.stringify(stored))
+      .expire(answersKey, ROOM_TTL_SECONDS)
+      .exec();
+
+    const [players, submittedCount] = await Promise.all([
+      this.redis.client.hlen(`room:${roomId}:players`),
+      this.redis.client.hlen(answersKey),
+    ]);
+    const allSubmitted = submittedCount >= players;
+    if (allSubmitted) {
+      // Early close marker; the round_result flow (0038) picks it up.
+      await this.redis.client.hset(stateKey, 'roundStatus', 'round_result');
+    }
+
+    return {
+      ack: { accepted: true, questionIndex: payload.questionIndex },
+      roomId,
+      allSubmitted,
+    };
   }
 
   /** Player-safe ActiveQuestion of the running game, with the time left. */

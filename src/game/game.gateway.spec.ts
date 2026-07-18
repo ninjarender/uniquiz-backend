@@ -9,6 +9,7 @@ describe('GameGateway', () => {
   const rejoinRoom = jest.fn();
   const startGame = jest.fn();
   const handleDisconnect = jest.fn();
+  const submitAnswer = jest.fn();
   const leaveRoom = jest.fn();
   const leave = jest.fn();
   const serverEmit = jest.fn();
@@ -46,6 +47,7 @@ describe('GameGateway', () => {
             rejoinRoom,
             leaveRoom,
             startGame,
+            submitAnswer,
             handleDisconnect,
           },
         },
@@ -178,6 +180,50 @@ describe('GameGateway', () => {
       message: 'nope',
     });
     expect(serverEmit).not.toHaveBeenCalled();
+  });
+
+  it('submit_answer → submit_answer_ack to the sender', async () => {
+    submitAnswer.mockResolvedValue({
+      ack: { accepted: true, questionIndex: 1 },
+      roomId: 'r1',
+      allSubmitted: false,
+    });
+    const socket = client();
+    socket.data.roomId = 'r1';
+    socket.data.playerId = 'p-1';
+
+    await gateway.handleSubmitAnswer(socket, {
+      gameId: 'g1',
+      questionIndex: 1,
+      selectedOptionIndex: 2,
+    });
+
+    expect(submitAnswer).toHaveBeenCalledWith(
+      { roomId: 'r1', playerId: 'p-1' },
+      expect.objectContaining({
+        gameId: 'g1',
+        questionIndex: 1,
+        selectedOptionIndex: 2,
+      }),
+    );
+    expect(emit).toHaveBeenCalledWith('submit_answer_ack', {
+      accepted: true,
+      questionIndex: 1,
+    });
+  });
+
+  it('submit_answer with an out-of-range option → invalid_payload', async () => {
+    await gateway.handleSubmitAnswer(client(), {
+      gameId: 'g1',
+      questionIndex: 1,
+      selectedOptionIndex: 4,
+    });
+
+    expect(submitAnswer).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith(
+      'error',
+      expect.objectContaining({ code: 'invalid_payload' }),
+    );
   });
 
   it('disconnect of the host → host_changed to the room', async () => {
