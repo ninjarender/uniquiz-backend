@@ -16,6 +16,7 @@ type MockJob = {
   name: string;
   data: GenerateBankJobData;
   state: string;
+  failedReason?: string;
   getState(): Promise<string>;
 };
 
@@ -195,6 +196,115 @@ describe('Generation endpoints (e2e)', () => {
         total: 0,
       });
       expect(queueMock.last().data.questionIds).toEqual([]);
+    });
+  });
+
+  describe('GET /api/v1/banks/{bankId}/generation', () => {
+    it('401: requires a bearer token', async () => {
+      await request(app.getHttpServer())
+        .get(`/api/v1/banks/${randomUUID()}/generation`)
+        .expect(401);
+    });
+
+    it('404: unknown bank', async () => {
+      await request(app.getHttpServer())
+        .get(`/api/v1/banks/${randomUUID()}/generation`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(404);
+    });
+
+    it('200: idle with countsByStatus when generation was never started', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const bank = prismaMock.seedBank(idA, 'Idle', 4, 2);
+
+      const response = await request(app.getHttpServer())
+        .get(`/api/v1/banks/${bank.id}/generation`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(200);
+
+      expect(response.body).toEqual({
+        status: 'idle',
+        total: 0,
+        countsByStatus: { accepted: 2 },
+      });
+    });
+
+    it('200: queued right after start, running while active', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const bank = prismaMock.seedBank(idA, 'Polling', 3, 1);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/banks/${bank.id}/generation`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(202);
+      const job = queueMock.last();
+
+      const queued = await request(app.getHttpServer())
+        .get(`/api/v1/banks/${bank.id}/generation`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(200);
+      expect(queued.body).toEqual({
+        jobId: job.id,
+        status: 'queued',
+        total: 2,
+        countsByStatus: { accepted: 1 },
+      });
+
+      job.state = 'active';
+      const running = await request(app.getHttpServer())
+        .get(`/api/v1/banks/${bank.id}/generation`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(200);
+      expect((running.body as { status: string }).status).toBe('running');
+    });
+
+    it('200: done after the job completes', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const bank = prismaMock.seedBank(idA, 'Done', 1, 0);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/banks/${bank.id}/generation`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(202);
+      queueMock.last().state = 'completed';
+
+      const response = await request(app.getHttpServer())
+        .get(`/api/v1/banks/${bank.id}/generation`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(200);
+
+      expect(response.body).toEqual({
+        jobId: queueMock.last().id,
+        status: 'done',
+        total: 1,
+        countsByStatus: {},
+      });
+    });
+
+    it('200: failed with the error reason', async () => {
+      const idA = prismaMock.userIdByEmail(hostA.email);
+      const bank = prismaMock.seedBank(idA, 'Broken', 1, 0);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/banks/${bank.id}/generation`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(202);
+      const job = queueMock.last();
+      job.state = 'failed';
+      job.failedReason = 'Gemini API unavailable';
+
+      const response = await request(app.getHttpServer())
+        .get(`/api/v1/banks/${bank.id}/generation`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(200);
+
+      expect(response.body).toEqual({
+        jobId: job.id,
+        status: 'failed',
+        total: 1,
+        countsByStatus: {},
+        error: 'Gemini API unavailable',
+      });
     });
   });
 });

@@ -39,6 +39,14 @@ const ACTIVE_JOB_STATES = [
   'waiting-children',
 ];
 
+/** BullMQ job state → GenerationJob.status of the OpenAPI contract. */
+function toContractStatus(state: string): GenerationJobView['status'] {
+  if (state === 'active') return 'running';
+  if (state === 'completed') return 'done';
+  if (state === 'failed') return 'failed';
+  return 'queued';
+}
+
 @Injectable()
 export class GenerationService {
   constructor(
@@ -90,6 +98,49 @@ export class GenerationService {
     }
 
     return { jobId: job.id, status: 'queued', total: questionIds.length };
+  }
+
+  /**
+   * State of the bank's last generation job (idle when none was ever
+   * started) plus the per-status summary of the bank's answer sets - the
+   * polling endpoint for the frontend. 404 mirrors startGeneration.
+   */
+  async getGeneration(
+    userId: string,
+    bankId: string,
+  ): Promise<GenerationJobView> {
+    const bank = await this.prisma.bank.findFirst({
+      where: { id: bankId, userId },
+      include: { questions: { include: { answerSet: true } } },
+    });
+    if (!bank) {
+      throw new NotFoundException('Bank not found');
+    }
+
+    const countsByStatus: Record<string, number> = {};
+    for (const question of bank.questions) {
+      if (!question.answerSet) continue;
+      const status = question.answerSet.status;
+      countsByStatus[status] = (countsByStatus[status] ?? 0) + 1;
+    }
+
+    const jobId = await this.redis.client.get(bankJobKey(bankId));
+    const job = jobId ? await this.queue.getJob(jobId) : undefined;
+    if (!job) {
+      return { status: 'idle', total: 0, countsByStatus };
+    }
+
+    const status = toContractStatus(await job.getState());
+    const view: GenerationJobView = {
+      jobId: job.id,
+      status,
+      total: job.data.questionIds.length,
+      countsByStatus,
+    };
+    if (status === 'failed' && job.failedReason) {
+      view.error = job.failedReason;
+    }
+    return view;
   }
 
   /** True while the last generation job of the bank is queued or running. */

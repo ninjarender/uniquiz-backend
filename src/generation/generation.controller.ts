@@ -1,5 +1,6 @@
 import {
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Param,
@@ -25,5 +26,14 @@ export class GenerationController {
     @Param('bankId', ParseUUIDPipe) bankId: string,
   ): Promise<GenerationJobView> {
     return this.generationService.startGeneration(payload.sub, bankId);
+  }
+
+  /** GET /banks/{bankId}/generation → 200 GenerationJob | 401 | 404. */
+  @Get()
+  status(
+    @CurrentUser() payload: JwtPayload,
+    @Param('bankId', ParseUUIDPipe) bankId: string,
+  ): Promise<GenerationJobView> {
+    return this.generationService.getGeneration(payload.sub, bankId);
   }
 }
