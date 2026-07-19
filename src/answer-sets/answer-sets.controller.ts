@@ -31,6 +31,16 @@ export class AnswerSetsController {
     return this.answerSetsService.acceptAnswerSet(payload.sub, answerSetId);
   }
 
+  /** POST /answer-sets/{answerSetId}/regenerate → 202 AnswerSet | 401 | 404 | 409. */
+  @Post(':answerSetId/regenerate')
+  @HttpCode(HttpStatus.ACCEPTED)
+  regenerate(
+    @CurrentUser() payload: JwtPayload,
+    @Param('answerSetId', ParseUUIDPipe) answerSetId: string,
+  ): Promise<AnswerSetView> {
+    return this.answerSetsService.regenerateAnswerSet(payload.sub, answerSetId);
+  }
+
   /** PATCH /answer-sets/{answerSetId} → 200 AnswerSet | 400 | 401 | 404. */
   @Patch(':answerSetId')
   update(

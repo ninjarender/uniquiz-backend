@@ -1,3 +1,4 @@
+import { getQueueToken } from '@nestjs/bullmq';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
@@ -5,19 +6,34 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { setupApp } from '../src/app.setup';
+import { RegenerateSetJobData } from '../src/generation/generation.constants';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { PrismaMock } from './prisma.mock';
+import { PrismaMock, StoredAnswerSet } from './prisma.mock';
+
+type EnqueuedJob = { name: string; data: RegenerateSetJobData };
+
+/** Records enqueued jobs; answer-sets endpoints never read them back. */
+class QueueMock {
+  readonly added: EnqueuedJob[] = [];
+
+  add(name: string, data: RegenerateSetJobData): Promise<EnqueuedJob> {
+    const job = { name, data };
+    this.added.push(job);
+    return Promise.resolve(job);
+  }
+}
 
 describe('Answer-set endpoints (e2e)', () => {
   let app: INestApplication<App>;
   let prismaMock: PrismaMock;
+  let queueMock: QueueMock;
   let tokenA: string;
   let tokenB: string;
   const hostA = { email: 'sets-a@example.com', password: 'password123' };
   const hostB = { email: 'sets-b@example.com', password: 'password123' };
 
   /** A fresh bank of host A with one question and a set in the status. */
-  function seedSet(status: string): { id: string } {
+  function seedSet(status: string): StoredAnswerSet {
     const idA = prismaMock.userIdByEmail(hostA.email);
     const bank = prismaMock.seedBank(idA, `Bank-${status}`, 1, 0);
     const [questionId] = prismaMock.questionIdsOf(bank.id);
@@ -28,9 +44,12 @@ describe('Answer-set endpoints (e2e)', () => {
     process.env.JWT_SECRET = 'e2e-test-secret';
 
     prismaMock = new PrismaMock();
+    queueMock = new QueueMock();
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(PrismaService)
       .useValue(prismaMock)
+      .overrideProvider(getQueueToken('generation'))
+      .useValue(queueMock)
       .compile();
 
     app = setupApp(moduleRef.createNestApplication<INestApplication<App>>());
@@ -205,7 +224,7 @@ describe('Answer-set endpoints (e2e)', () => {
         .expect(400);
     });
 
-    it('400: options must be exactly 4', async () => {
+    it('400: options must be exactly 4 and index in range', async () => {
       const set = seedSet('in_review');
 
       await request(app.getHttpServer())
@@ -219,6 +238,63 @@ describe('Answer-set endpoints (e2e)', () => {
         .set('Authorization', `Bearer ${tokenA}`)
         .send({ correctIndex: 4 })
         .expect(400);
+    });
+  });
+
+  describe('POST /api/v1/answer-sets/{answerSetId}/regenerate', () => {
+    it('401: requires a bearer token', async () => {
+      await request(app.getHttpServer())
+        .post(`/api/v1/answer-sets/${randomUUID()}/regenerate`)
+        .expect(401);
+    });
+
+    it('404: unknown answer set', async () => {
+      await request(app.getHttpServer())
+        .post(`/api/v1/answer-sets/${randomUUID()}/regenerate`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(404);
+    });
+
+    it("404: another host's answer set looks missing", async () => {
+      const set = seedSet('accepted');
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/answer-sets/${set.id}/regenerate`)
+        .set('Authorization', `Bearer ${tokenB}`)
+        .expect(404);
+    });
+
+    it('202: an accepted set goes regenerating and a job is enqueued', async () => {
+      const set = seedSet('accepted');
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/answer-sets/${set.id}/regenerate`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(202);
+
+      expect((response.body as { status: string }).status).toBe('regenerating');
+      const job = queueMock.added.at(-1);
+      expect(job?.name).toBe('regenerate-set');
+      expect(job?.data).toEqual({
+        answerSetId: set.id,
+        questionId: set.questionId,
+      });
+    });
+
+    it('409: repeated regenerate while already regenerating', async () => {
+      const set = seedSet('accepted');
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/answer-sets/${set.id}/regenerate`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(202);
+
+      const jobsBefore = queueMock.added.length;
+      await request(app.getHttpServer())
+        .post(`/api/v1/answer-sets/${set.id}/regenerate`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(409);
+      expect(queueMock.added.length).toBe(jobsBefore);
     });
   });
 });

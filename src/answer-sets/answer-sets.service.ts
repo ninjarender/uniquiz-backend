@@ -1,12 +1,19 @@
+import { InjectQueue } from '@nestjs/bullmq';
 import {
   BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Queue } from 'bullmq';
 import { AnswerSet } from '../../generated/prisma/client';
 import { AnswerSetStatus } from '../../generated/prisma/enums';
 import { AnswerSetView } from '../banks/banks.service';
+import {
+  GENERATION_QUEUE,
+  REGENERATE_SET_JOB,
+  RegenerateSetJobData,
+} from '../generation/generation.constants';
 import { PrismaService } from '../prisma/prisma.service';
 import { AnswerSetPatchDto } from './dto/answer-set-patch.dto';
 
@@ -28,7 +35,11 @@ export function toAnswerSetView(answerSet: AnswerSet): AnswerSetView {
 
 @Injectable()
 export class AnswerSetsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @InjectQueue(GENERATION_QUEUE)
+    private readonly queue: Queue<RegenerateSetJobData>,
+  ) {}
 
   /**
    * Host accepts a generated set: in_review → accepted with reviewedAt.
@@ -93,6 +104,36 @@ export class AnswerSetsService {
         status: AnswerSetStatus.edited,
         reviewedAt: new Date(),
       },
+    });
+    return toAnswerSetView(updated);
+  }
+
+  /**
+   * Sends the set back to the start of the lifecycle: status regenerating
+   * plus a single-set BullMQ job on the shared generation queue. 404 for a
+   * missing/foreign set; 409 while the set is already regenerating.
+   */
+  async regenerateAnswerSet(
+    userId: string,
+    answerSetId: string,
+  ): Promise<AnswerSetView> {
+    const answerSet = await this.prisma.answerSet.findFirst({
+      where: { id: answerSetId, question: { bank: { userId } } },
+    });
+    if (!answerSet) {
+      throw new NotFoundException('Answer set not found');
+    }
+    if (answerSet.status === AnswerSetStatus.regenerating) {
+      throw new ConflictException('Answer set is already being regenerated');
+    }
+
+    const updated = await this.prisma.answerSet.update({
+      where: { id: answerSetId },
+      data: { status: AnswerSetStatus.regenerating },
+    });
+    await this.queue.add(REGENERATE_SET_JOB, {
+      answerSetId,
+      questionId: answerSet.questionId,
     });
     return toAnswerSetView(updated);
   }
