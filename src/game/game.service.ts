@@ -216,6 +216,11 @@ const ROUND_GRACE_MS = 1500;
 /** Leaderboard pause between round_result and the next question (value TBD). */
 const ROUND_RESULT_PAUSE_MS = 5000;
 
+/** Atomic question_active -> round_result flip; returns 1 only to the winner. */
+const CLOSE_ROUND_FLIP =
+  "if redis.call('hget', KEYS[1], 'roundStatus') == 'question_active' then " +
+  "redis.call('hset', KEYS[1], 'roundStatus', 'round_result') return 1 end return 0";
+
 /** Game snapshot lives ~1h after the game_results insert (data-model.md). */
 const GAME_REVIEW_TTL_SECONDS = 60 * 60;
 
@@ -803,8 +808,15 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
     if (state.roundStatus !== 'question_active') {
       return null;
     }
+    // Concurrent submits can both see "all submitted" (and the round timer
+    // can race them too): the status flip is atomic in Redis, and only the
+    // caller that wins it closes the round - otherwise round_result (and,
+    // on the last round, the game_over flow) would fire more than once.
+    const flipped = await this.redis.client.eval(CLOSE_ROUND_FLIP, 1, stateKey);
+    if (flipped !== 1) {
+      return null;
+    }
     this.clearRoundTimer(gameId);
-    await this.redis.client.hset(stateKey, 'roundStatus', 'round_result');
 
     const questionIndex = Number(state.currentIndex);
     const answersKey = `game:${gameId}:answers:${questionIndex}`;

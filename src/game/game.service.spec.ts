@@ -11,6 +11,7 @@ describe('GameService', () => {
   const hmget = jest.fn();
   const hset = jest.fn();
   const hlenMock = jest.fn();
+  const evalMock = jest.fn();
   const questionFindMany = jest.fn();
   const gameResultCreate = jest.fn();
   const zrangebyscore = jest.fn();
@@ -53,6 +54,8 @@ describe('GameService', () => {
     multiZrem.mockReturnValue(multi);
     multiExpire.mockReturnValue(multi);
     multiExec.mockResolvedValue([]);
+    // closeRound's atomic status flip: the caller wins by default.
+    evalMock.mockResolvedValue(1);
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -66,6 +69,7 @@ describe('GameService', () => {
               hmget,
               hset,
               hlen: hlenMock,
+              eval: evalMock,
               zrangebyscore,
               zscore,
               zrem,
@@ -724,10 +728,10 @@ describe('GameService', () => {
       const result = await service.submitAnswer(session, payload);
 
       expect(result.allSubmitted).toBe(true);
-      expect(hset).toHaveBeenCalledWith(
+      expect(evalMock).toHaveBeenCalledWith(
+        expect.stringContaining('round_result'),
+        1,
         'game:g1:state',
-        'roundStatus',
-        'round_result',
       );
       expect(onRoundResult).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -790,7 +794,21 @@ describe('GameService', () => {
       });
 
       expect(await service.closeRound('g1', 'r1')).toBeNull();
-      expect(hset).not.toHaveBeenCalled();
+      expect(evalMock).not.toHaveBeenCalled();
+    });
+
+    it('loses the atomic flip race -> no-op (no double round_result)', async () => {
+      hgetall.mockResolvedValueOnce({
+        roomId: 'r1',
+        currentIndex: '0',
+        roundStatus: 'question_active',
+      });
+      evalMock.mockResolvedValueOnce(0);
+      const onRoundResult = jest.fn();
+      service.onRoundResult = onRoundResult;
+
+      expect(await service.closeRound('g1', 'r1')).toBeNull();
+      expect(onRoundResult).not.toHaveBeenCalled();
     });
 
     it('records "no answer" for silent players: trap pays 500 and counts correct', async () => {
@@ -836,10 +854,10 @@ describe('GameService', () => {
       const result = await service.closeRound('g1', 'r1');
 
       expect(result).toEqual({ gameId: 'g1', roomId: 'r1', questionIndex: 1 });
-      expect(hset).toHaveBeenCalledWith(
+      expect(evalMock).toHaveBeenCalledWith(
+        expect.stringContaining('round_result'),
+        1,
         'game:g1:state',
-        'roundStatus',
-        'round_result',
       );
       const hsetCalls = multiHset.mock.calls as string[][];
       expect(hsetCalls).toHaveLength(1);
