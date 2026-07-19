@@ -116,4 +116,109 @@ describe('Answer-set endpoints (e2e)', () => {
         .expect(409);
     });
   });
+
+  describe('PATCH /api/v1/answer-sets/{answerSetId}', () => {
+    it('401: requires a bearer token', async () => {
+      await request(app.getHttpServer())
+        .patch(`/api/v1/answer-sets/${randomUUID()}`)
+        .send({ explanation: 'x' })
+        .expect(401);
+    });
+
+    it('404: unknown answer set', async () => {
+      await request(app.getHttpServer())
+        .patch(`/api/v1/answer-sets/${randomUUID()}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ explanation: 'x' })
+        .expect(404);
+    });
+
+    it("404: another host's answer set looks missing", async () => {
+      const set = seedSet('in_review');
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/answer-sets/${set.id}`)
+        .set('Authorization', `Bearer ${tokenB}`)
+        .send({ explanation: 'x' })
+        .expect(404);
+    });
+
+    it('200: edits options and correct index, set becomes edited', async () => {
+      const set = seedSet('in_review');
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/answer-sets/${set.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ options: ['W', 'X', 'Y', 'Z'], correctIndex: 3 })
+        .expect(200);
+
+      const body = response.body as {
+        options: string[];
+        correctIndex: number;
+        status: string;
+        reviewedAt?: string;
+      };
+      expect(body.options).toEqual(['W', 'X', 'Y', 'Z']);
+      expect(body.correctIndex).toBe(3);
+      expect(body.status).toBe('edited');
+      expect(body.reviewedAt).toBeDefined();
+    });
+
+    it('200: edits explanation and spare distractor', async () => {
+      const set = seedSet('in_review');
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/answer-sets/${set.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ explanation: 'better why', spareDistractor: 'F' })
+        .expect(200);
+
+      const body = response.body as {
+        explanation: string;
+        spareDistractor: string;
+        status: string;
+      };
+      expect(body.explanation).toBe('better why');
+      expect(body.spareDistractor).toBe('F');
+      expect(body.status).toBe('edited');
+    });
+
+    it('200: an already accepted set can still be edited', async () => {
+      const set = seedSet('accepted');
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/answer-sets/${set.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ correctIndex: 0 })
+        .expect(200);
+
+      expect((response.body as { status: string }).status).toBe('edited');
+    });
+
+    it('400: empty body (minProperties: 1)', async () => {
+      const set = seedSet('in_review');
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/answer-sets/${set.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({})
+        .expect(400);
+    });
+
+    it('400: options must be exactly 4', async () => {
+      const set = seedSet('in_review');
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/answer-sets/${set.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ options: ['only', 'three', 'items'] })
+        .expect(400);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/answer-sets/${set.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ correctIndex: 4 })
+        .expect(400);
+    });
+  });
 });
