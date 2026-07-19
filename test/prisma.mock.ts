@@ -84,6 +84,24 @@ export class PrismaMock {
     return bank;
   }
 
+  /** Test seeding helper: an answer set for a question, in a given status. */
+  seedAnswerSet(questionId: string, status: string): StoredAnswerSet {
+    const answerSet: StoredAnswerSet = {
+      id: randomUUID(),
+      questionId,
+      options: ['A', 'B', 'C', 'D'],
+      correctIndex: 1,
+      spareDistractor: 'E',
+      explanation: 'because',
+      status,
+      selfCheckPassed: true,
+      generatedAt: new Date(),
+      reviewedAt: null,
+    };
+    this.answerSets.set(questionId, answerSet);
+    return answerSet;
+  }
+
   /** Question ids of a bank, in creation order (test helper). */
   questionIdsOf(bankId: string): string[] {
     return this.questions
@@ -112,6 +130,54 @@ export class PrismaMock {
     Promise.all(operations);
 
   answerSet = {
+    findFirst: ({
+      where,
+    }: {
+      where: { id: string; question: { bank: { userId: string } } };
+    }) => {
+      const answerSet = [...this.answerSets.values()].find(
+        (s) => s.id === where.id,
+      );
+      if (!answerSet) return Promise.resolve(null);
+      const question = this.questions.find(
+        (q) => q.id === answerSet.questionId,
+      );
+      const owned =
+        question &&
+        this.banks.some(
+          (b) =>
+            b.id === question.bankId && b.userId === where.question.bank.userId,
+        );
+      return Promise.resolve(owned ? { ...answerSet } : null);
+    },
+    update: ({
+      where,
+      data,
+    }: {
+      where: { id: string };
+      data: Partial<
+        Pick<
+          StoredAnswerSet,
+          | 'options'
+          | 'correctIndex'
+          | 'spareDistractor'
+          | 'explanation'
+          | 'status'
+          | 'reviewedAt'
+        >
+      >;
+    }) => {
+      const answerSet = [...this.answerSets.values()].find(
+        (s) => s.id === where.id,
+      );
+      if (!answerSet) {
+        return Promise.reject(
+          Object.assign(new Error('Record not found'), { code: 'P2025' }),
+        );
+      }
+      Object.assign(answerSet, data);
+      return Promise.resolve({ ...answerSet });
+    },
     deleteMany: ({
       where,
     }: {
