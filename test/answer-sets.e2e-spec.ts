@@ -285,6 +285,17 @@ describe('Answer-set endpoints (e2e)', () => {
       });
     });
 
+    it('409: a set the worker is generating right now (race window)', async () => {
+      const set = seedSet('generating');
+
+      const jobsBefore = queueMock.added.length;
+      await request(app.getHttpServer())
+        .post(`/api/v1/answer-sets/${set.id}/regenerate`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .expect(409);
+      expect(queueMock.added.length).toBe(jobsBefore);
+    });
+
     it('409: repeated regenerate while already regenerating', async () => {
       const set = seedSet('accepted');
 

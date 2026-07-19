@@ -17,13 +17,15 @@ export class GeminiService {
     this.client = new GoogleGenAI({
       apiKey: config.get<string>('GEMINI_API_KEY'),
     });
+    // "latest" aliases track the newest stable Flash tier - versioned ids
+    // get retired for new API keys (gemini-2.5-flash already 404s on them).
     this.generationModel = config.get<string>(
       'GEMINI_GENERATION_MODEL',
-      'gemini-2.5-flash',
+      'gemini-flash-latest',
     );
     this.selfCheckModel = config.get<string>(
       'GEMINI_SELF_CHECK_MODEL',
-      'gemini-2.5-flash-lite',
+      'gemini-flash-lite-latest',
     );
   }
 

@@ -33,6 +33,13 @@ export function toAnswerSetView(answerSet: AnswerSet): AnswerSetView {
   };
 }
 
+/** Statuses meaning the generation pipeline already owns the set. */
+const IN_FLIGHT_STATUSES: AnswerSetStatus[] = [
+  AnswerSetStatus.regenerating,
+  AnswerSetStatus.generating,
+  AnswerSetStatus.self_check,
+];
+
 @Injectable()
 export class AnswerSetsService {
   constructor(
@@ -111,7 +118,10 @@ export class AnswerSetsService {
   /**
    * Sends the set back to the start of the lifecycle: status regenerating
    * plus a single-set BullMQ job on the shared generation queue. 404 for a
-   * missing/foreign set; 409 while the set is already regenerating.
+   * missing/foreign set; 409 while the set is anywhere in the generation
+   * pipeline (regenerating, but also generating/self_check - the worker
+   * moves the set through those moments after the regenerate call, and a
+   * repeat request must not enqueue a duplicate job).
    */
   async regenerateAnswerSet(
     userId: string,
@@ -123,7 +133,7 @@ export class AnswerSetsService {
     if (!answerSet) {
       throw new NotFoundException('Answer set not found');
     }
-    if (answerSet.status === AnswerSetStatus.regenerating) {
+    if (IN_FLIGHT_STATUSES.includes(answerSet.status)) {
       throw new ConflictException('Answer set is already being regenerated');
     }
 
