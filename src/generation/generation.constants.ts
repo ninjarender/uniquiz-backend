@@ -1,6 +1,22 @@
 /** BullMQ queue for AI answer-set generation (one job covers a whole bank). */
 export const GENERATION_QUEUE = 'generation';
 
+/**
+ * Shared registration config: every module producing into the queue must use
+ * the same defaults. API failures retry with exponential backoff; jobs are
+ * kept after completion - GET /banks/{bankId}/generation reads them back.
+ */
+export const GENERATION_QUEUE_CONFIG = {
+  name: GENERATION_QUEUE,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 5000 },
+  },
+};
+
+/** Attempts per answer set when the AI returns invalid output. */
+export const MAX_SET_ATTEMPTS = 3;
+
 /** Job name for the "generate answer sets for a bank" task. */
 export const GENERATE_BANK_JOB = 'generate-bank';
 

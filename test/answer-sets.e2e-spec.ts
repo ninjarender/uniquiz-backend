@@ -7,6 +7,7 @@ import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { setupApp } from '../src/app.setup';
 import { RegenerateSetJobData } from '../src/generation/generation.constants';
+import { GenerationProcessor } from '../src/generation/generation.processor';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaMock, StoredAnswerSet } from './prisma.mock';
 
@@ -50,6 +51,9 @@ describe('Answer-set endpoints (e2e)', () => {
       .useValue(prismaMock)
       .overrideProvider(getQueueToken('generation'))
       .useValue(queueMock)
+      // Plain object carries no @Processor metadata → no BullMQ worker in e2e.
+      .overrideProvider(GenerationProcessor)
+      .useValue({})
       .compile();
 
     app = setupApp(moduleRef.createNestApplication<INestApplication<App>>());
