@@ -1,6 +1,7 @@
 import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { AnswerSetsModule } from './answer-sets/answer-sets.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
@@ -33,6 +34,7 @@ import { ResultsModule } from './results/results.module';
     ImagesModule,
     QuestionsModule,
     GenerationModule,
+    AnswerSetsModule,
     RoomsModule,
     GameModule,
     ResultsModule,
